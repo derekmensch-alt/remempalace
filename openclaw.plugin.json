@@ -1,0 +1,64 @@
+{
+  "id": "remempalace",
+  "kind": "memory",
+  "name": "remempalace",
+  "description": "Full-lifecycle memory plugin for OpenClaw, powered by MemPalace. Fast (persistent MCP), token-aware (tiered injection), complete (diary + KG lifecycle).",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mcpPythonBin": {
+        "type": "string",
+        "description": "Path to Python binary in the mempalace virtualenv",
+        "default": "/home/derek/.local/share/pipx/venvs/mempalace/bin/python"
+      },
+      "cache": {
+        "type": "object",
+        "properties": {
+          "capacity": { "type": "number", "default": 200 },
+          "ttlMs": { "type": "number", "default": 300000 },
+          "kgTtlMs": { "type": "number", "default": 600000 }
+        }
+      },
+      "injection": {
+        "type": "object",
+        "properties": {
+          "maxTokens": { "type": "number", "default": 800 },
+          "budgetPercent": { "type": "number", "default": 0.15 },
+          "similarityThreshold": { "type": "number", "default": 0.25 },
+          "useAaak": { "type": "boolean", "default": true }
+        }
+      },
+      "tiers": {
+        "type": "object",
+        "properties": {
+          "l1Threshold": { "type": "number", "default": 0.3 },
+          "l2Threshold": { "type": "number", "default": 0.25 },
+          "l2BudgetFloor": { "type": "number", "default": 0.5 }
+        }
+      },
+      "diary": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "maxEntryTokens": { "type": "number", "default": 500 }
+        }
+      },
+      "kg": {
+        "type": "object",
+        "properties": {
+          "autoLearn": { "type": "boolean", "default": true },
+          "batchSize": { "type": "number", "default": 5 },
+          "flushIntervalMs": { "type": "number", "default": 30000 }
+        }
+      },
+      "prefetch": {
+        "type": "object",
+        "properties": {
+          "diaryCount": { "type": "number", "default": 3 },
+          "identityEntities": { "type": "boolean", "default": true }
+        }
+      }
+    }
+  }
+}
