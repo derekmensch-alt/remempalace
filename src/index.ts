@@ -4,6 +4,10 @@ import { MemoryCache } from "./cache.js";
 import { McpClient } from "./mcp-client.js";
 import { MemoryRouter } from "./router.js";
 import type { SearchResult, RemempalaceConfig } from "./types.js";
+import { BudgetManager } from "./budget.js";
+import { buildTieredInjection } from "./tiers.js";
+import { countTokens } from "./token-counter.js";
+import type { KgFact } from "./types.js";
 
 interface PluginApi {
   registerMemoryCapability?: (
@@ -53,6 +57,15 @@ function resolvePrompt(ev: PromptBuildEvent): string {
   return "";
 }
 
+function normalizeKgResult(raw: unknown): KgFact[] {
+  if (!raw || typeof raw !== "object") return [];
+  if (Array.isArray(raw)) return raw as KgFact[];
+  if ("facts" in raw && Array.isArray((raw as { facts: unknown[] }).facts)) {
+    return (raw as { facts: KgFact[] }).facts;
+  }
+  return [];
+}
+
 const plugin = {
   id: "remempalace",
   name: "remempalace",
@@ -89,20 +102,41 @@ const plugin = {
     if (typeof api.on === "function") {
       api.on("before_prompt_build", async (event: unknown, ctx: unknown) => {
         const ev = event as PromptBuildEvent;
-        const hctx = ctx as HookContext;
+        const hctx = ctx as HookContext & { modelId?: string; contextWindow?: number };
         const sessionKey = hctx?.sessionKey ?? "default";
         cachedBySession.set(sessionKey, null);
         const prompt = resolvePrompt(ev);
         if (!prompt || prompt.length < 10) return;
+
+        const contextWindow = hctx.contextWindow ?? 200000;
+        const conversationTokens = ev.messages
+          ? ev.messages.reduce((sum, m) => sum + countTokens(extractText(m)), 0)
+          : 0;
+
+        const budget = new BudgetManager({
+          contextWindow,
+          maxMemoryTokens: cfg.injection.maxTokens,
+          budgetPercent: cfg.injection.budgetPercent,
+          l2BudgetFloor: cfg.tiers.l2BudgetFloor,
+        }).compute({ conversationTokens });
+
+        if (budget.allowedTiers.length === 0) return;
+
         try {
           const bundle = await router.readBundle(prompt, 5);
-          if (bundle.searchResults.length === 0) return;
+          const kgFacts = normalizeKgResult(bundle.kgResults);
+          const injected = buildTieredInjection({
+            kgFacts,
+            searchResults: bundle.searchResults,
+            budget,
+            tiers: cfg.tiers,
+            useAaak: cfg.injection.useAaak,
+          });
+          if (injected.length === 0) return;
           const lines = [
             "## Memory Context (remempalace)",
             "",
-            ...bundle.searchResults.slice(0, 5).map(
-              (r) => `- [${r.wing}/${r.room}] ${r.text.slice(0, 300)}`,
-            ),
+            ...injected,
             "",
           ];
           cachedBySession.set(sessionKey, lines);
