@@ -1,39 +1,6 @@
-# Dependencies
 node_modules/
-
-# Build output
 dist/
-build/
-*.tsbuildinfo
-
-# Test / coverage
-coverage/
-.nyc_output/
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Env / secrets
 .env
-.env.*
-!.env.example
-
-# OS
+*.log
 .DS_Store
-Thumbs.db
-
-# Editor
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Local notes (keep ignored — write proper docs instead)
-NOTES.md
-SCRATCH.md
-
-# Git worktrees
-.worktrees/
+coverage/
