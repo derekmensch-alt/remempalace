@@ -8,6 +8,12 @@ import { BudgetManager } from "./budget.js";
 import { buildTieredInjection } from "./tiers.js";
 import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
+import { summarizeSession, writeDiaryAsync } from "./diary.js";
+
+interface SessionMessage {
+  role?: string;
+  content?: unknown;
+}
 
 interface PluginApi {
   registerMemoryCapability?: (
@@ -98,8 +104,30 @@ const plugin = {
     }
 
     const cachedBySession = new Map<string, string[] | null>();
+    const sessionMessages = new Map<string, SessionMessage[]>();
 
     if (typeof api.on === "function") {
+      api.on("llm_input", (event: unknown, ctx: unknown) => {
+        const ev = event as { historyMessages?: unknown[] };
+        const hctx = ctx as HookContext;
+        const key = hctx?.sessionKey ?? "default";
+        if (ev.historyMessages) {
+          sessionMessages.set(key, ev.historyMessages as SessionMessage[]);
+        }
+      });
+
+      if (cfg.diary.enabled) {
+        api.on("session_end", (event: unknown, ctx: unknown) => {
+          const hctx = ctx as HookContext;
+          const key = hctx?.sessionKey ?? "default";
+          const messages = sessionMessages.get(key) ?? [];
+          sessionMessages.delete(key);
+          const summary = summarizeSession(messages, { maxTokens: cfg.diary.maxEntryTokens });
+          if (!summary) return;
+          writeDiaryAsync(mcp, summary);
+        });
+      }
+
       api.on("before_prompt_build", async (event: unknown, ctx: unknown) => {
         const ev = event as PromptBuildEvent;
         const hctx = ctx as HookContext & { modelId?: string; contextWindow?: number };
