@@ -34,3 +34,6 @@ Thumbs.db
 # Local notes (keep ignored — write proper docs instead)
 NOTES.md
 SCRATCH.md
+
+# Git worktrees
+.worktrees/
