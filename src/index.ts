@@ -9,6 +9,7 @@ import { buildTieredInjection } from "./tiers.js";
 import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
 import { summarizeSession, writeDiaryAsync } from "./diary.js";
+import { KgBatcher, extractFacts } from "./kg.js";
 
 interface SessionMessage {
   role?: string;
@@ -125,6 +126,24 @@ const plugin = {
           const summary = summarizeSession(messages, { maxTokens: cfg.diary.maxEntryTokens });
           if (!summary) return;
           writeDiaryAsync(mcp, summary);
+        });
+      }
+
+      const kgBatcher = cfg.kg.autoLearn
+        ? new KgBatcher(mcp, {
+            batchSize: cfg.kg.batchSize,
+            flushIntervalMs: cfg.kg.flushIntervalMs,
+          })
+        : null;
+
+      if (typeof api.on === "function" && kgBatcher) {
+        api.on("llm_output", (event: unknown) => {
+          const ev = event as { assistantTexts?: string[] };
+          if (!ev.assistantTexts) return;
+          for (const text of ev.assistantTexts) {
+            const facts = extractFacts(text);
+            for (const fact of facts) kgBatcher.add(fact);
+          }
         });
       }
 
