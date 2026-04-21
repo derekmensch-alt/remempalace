@@ -12,14 +12,15 @@ export interface CacheStats {
 }
 
 export class MemoryCache<V> {
-  private lru: LRUCache<string, V>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private lru: LRUCache<string, any>;
   private hitCount = 0;
   private missCount = 0;
 
   constructor(opts: CacheOptions) {
     // Use Date.now()-based perf so vitest fake timers can control TTL expiry
     const perf = { now: () => Date.now() };
-    this.lru = new LRUCache<string, V>({
+    this.lru = new LRUCache<string, object>({
       max: opts.capacity,
       ttl: opts.ttlMs,
       perf,
@@ -27,7 +28,7 @@ export class MemoryCache<V> {
   }
 
   get(key: string): V | undefined {
-    const value = this.lru.get(key);
+    const value = this.lru.get(key) as V | undefined;
     if (value === undefined) {
       this.missCount++;
     } else {
