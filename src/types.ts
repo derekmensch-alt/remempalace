@@ -38,6 +38,7 @@ export interface RemempalaceConfig {
     budgetPercent: number;
     similarityThreshold: number;
     useAaak: boolean;
+    knownEntities: string[];
   };
   tiers: {
     l1Threshold: number;
