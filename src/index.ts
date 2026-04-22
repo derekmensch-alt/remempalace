@@ -128,6 +128,8 @@ const plugin = {
       ? new KgBatcher(mcp, {
           batchSize: cfg.kg.batchSize,
           flushIntervalMs: cfg.kg.flushIntervalMs,
+          invalidateOnConflict: cfg.kg.invalidateOnConflict,
+          getMcpCaps: () => ({ hasKgInvalidate: mcp.hasKgInvalidate }),
         })
       : null;
 

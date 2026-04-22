@@ -32,6 +32,7 @@ export class McpClient {
   private initialized = false;
   hasDiaryWrite = false;
   hasDiaryRead = false;
+  hasKgInvalidate = false;
 
   constructor(opts: McpClientOptions) {
     this.pm = new ProcessManager({
@@ -77,6 +78,17 @@ export class McpClient {
       this.hasDiaryRead = true;
     } catch (err) {
       console.warn(`[remempalace] mempalace_diary_read probe failed: ${(err as Error).message}`);
+    }
+
+    try {
+      await this.callTool("mempalace_kg_invalidate", {
+        subject: "__probe__",
+        predicate: "__probe__",
+        object: "__probe__",
+      });
+      this.hasKgInvalidate = true;
+    } catch {
+      // upstream broken — leave false
     }
   }
 

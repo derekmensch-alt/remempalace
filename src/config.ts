@@ -14,7 +14,7 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
   },
   tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
   diary: { enabled: true, maxEntryTokens: 500 },
-  kg: { autoLearn: true, batchSize: 5, flushIntervalMs: 30000 },
+  kg: { autoLearn: true, batchSize: 5, flushIntervalMs: 30000, invalidateOnConflict: false },
   prefetch: { diaryCount: 3, identityEntities: true },
 };
 

@@ -55,6 +55,7 @@ export interface RemempalaceConfig {
     autoLearn: boolean;
     batchSize: number;
     flushIntervalMs: number;
+    invalidateOnConflict: boolean;
   };
   prefetch: {
     diaryCount: number;

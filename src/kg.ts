@@ -2,6 +2,15 @@ import type { McpClient } from "./mcp-client.js";
 import { dedupeWithKey } from "./dedup.js";
 import type { KgFact } from "./types.js";
 
+function normalizeKgFacts(raw: unknown): KgFact[] {
+  if (!raw || typeof raw !== "object") return [];
+  if (Array.isArray(raw)) return raw as KgFact[];
+  if ("facts" in raw && Array.isArray((raw as { facts: unknown[] }).facts)) {
+    return (raw as { facts: KgFact[] }).facts;
+  }
+  return [];
+}
+
 // Matches: "Derek uses OpenClaw" / "Derek prefers Rust" etc.
 // Stops object capture at short prepositions (as, for, in, at, by, on) or end
 const USES_PATTERN =
@@ -38,6 +47,8 @@ export function extractFacts(text: string): KgFact[] {
 export interface KgBatcherOptions {
   batchSize: number;
   flushIntervalMs: number;
+  invalidateOnConflict?: boolean;
+  getMcpCaps?: () => { hasKgInvalidate: boolean };
 }
 
 export class KgBatcher {
@@ -66,20 +77,41 @@ export class KgBatcher {
       this.buffer.splice(0),
       (f) => `${f.subject}|${f.predicate}|${f.object}`,
     );
-    await Promise.all(
-      batch.map((f) =>
-        this.mcp
-          .callTool("mempalace_kg_add", {
-            subject: f.subject,
-            predicate: f.predicate,
-            object: f.object,
-            valid_from: f.valid_from,
-          })
-          .catch(() => {
-            // silent — best effort
-          }),
-      ),
-    );
+    const shouldInvalidate =
+      this.opts.invalidateOnConflict === true &&
+      this.opts.getMcpCaps?.().hasKgInvalidate === true;
+
+    for (const f of batch) {
+      if (shouldInvalidate) {
+        try {
+          const raw = await this.mcp.callTool<unknown>("mempalace_kg_query", { entity: f.subject });
+          const existing = normalizeKgFacts(raw);
+          await Promise.all(
+            existing
+              .filter((e) => e.predicate === f.predicate && e.object !== f.object)
+              .map((e) =>
+                this.mcp
+                  .callTool("mempalace_kg_invalidate", {
+                    subject: e.subject,
+                    predicate: e.predicate,
+                    object: e.object,
+                  })
+                  .catch(() => {}),
+              ),
+          );
+        } catch {
+          // best effort
+        }
+      }
+      await this.mcp
+        .callTool("mempalace_kg_add", {
+          subject: f.subject,
+          predicate: f.predicate,
+          object: f.object,
+          valid_from: f.valid_from,
+        })
+        .catch(() => {});
+    }
   }
 
   private startTimer(): void {
