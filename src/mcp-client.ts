@@ -30,6 +30,8 @@ export class McpClient {
   private pending = new Map<number, PendingCall>();
   private buffer = "";
   private initialized = false;
+  hasDiaryWrite = false;
+  hasDiaryRead = false;
 
   constructor(opts: McpClientOptions) {
     this.pm = new ProcessManager({
@@ -52,6 +54,30 @@ export class McpClient {
 
   isReady(): boolean {
     return this.pm.isAlive() && this.initialized;
+  }
+
+  async probeCapabilities(): Promise<void> {
+    try {
+      await this.callTool("mempalace_diary_write", {
+        wing: "remempalace",
+        room: "selftest",
+        content: "probe",
+        added_by: "remempalace",
+      });
+      this.hasDiaryWrite = true;
+    } catch (err) {
+      console.warn(`[remempalace] mempalace_diary_write probe failed: ${(err as Error).message}`);
+    }
+
+    try {
+      await this.callTool("mempalace_diary_read", {
+        wing: "remempalace",
+        room: "selftest",
+      });
+      this.hasDiaryRead = true;
+    } catch (err) {
+      console.warn(`[remempalace] mempalace_diary_read probe failed: ${(err as Error).message}`);
+    }
   }
 
   private async initialize(): Promise<void> {

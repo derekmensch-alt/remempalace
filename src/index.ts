@@ -104,6 +104,7 @@ const plugin = {
     try {
       await mcp.start();
       logger.info("MCP client started");
+      mcp.probeCapabilities().catch(() => {});
     } catch (err) {
       logger.error(`MCP start failed: ${(err as Error).message}`);
     }
@@ -264,6 +265,14 @@ const plugin = {
         identityLines.push("## Identity (remempalace)", "");
         if (start.identity.soul) identityLines.push(start.identity.soul, "");
         if (start.identity.identity) identityLines.push(start.identity.identity, "");
+      }
+      if (!mcp.hasDiaryWrite) {
+        identityLines.push(
+          "## System Notes (remempalace)",
+          "",
+          "diary: falling back to local JSONL (~/.mempalace/palace/diary/) — mempalace_diary_write returned Internal tool error",
+          "",
+        );
       }
       return [...identityLines, ...recallLines];
     };
