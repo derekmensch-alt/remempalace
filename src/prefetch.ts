@@ -21,12 +21,15 @@ export async function prefetchWakeUp(
       return fallback;
     }
   };
-  const [status, diaryEntries] = await Promise.all([
+  const [statusResult, diaryResult] = await Promise.all([
     safe(mcp.callTool<PalaceStatus>("mempalace_status", {}), null),
     safe(
       mcp.callTool<unknown[]>("mempalace_diary_read", { limit: opts.diaryCount }),
       [],
     ),
+    safe(mcp.callTool("mempalace_search", { query: "__warmup__", limit: 1 }), null),
   ]);
+  const status = statusResult;
+  const diaryEntries = diaryResult;
   return { status, diaryEntries: Array.isArray(diaryEntries) ? diaryEntries : [] };
 }

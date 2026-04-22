@@ -30,4 +30,26 @@ describe("prefetchWakeUp", () => {
     expect(result.status).toBeNull();
     expect(result.diaryEntries).toBeDefined();
   });
+
+  it("fires warmup search concurrently", async () => {
+    const mockMcp = {
+      callTool: vi.fn(async () => ({})),
+    };
+    await prefetchWakeUp(mockMcp as any, { diaryCount: 2 });
+    const warmupCall = mockMcp.callTool.mock.calls.find(
+      ([name, args]: [string, Record<string, unknown>]) =>
+        name === "mempalace_search" &&
+        args?.query === "__warmup__" &&
+        args?.limit === 1,
+    );
+    expect(warmupCall).toBeDefined();
+  });
+
+  it("does not include warmup result in returned PrefetchResult", async () => {
+    const mockMcp = {
+      callTool: vi.fn(async () => ({})),
+    };
+    const result = await prefetchWakeUp(mockMcp as any, { diaryCount: 2 });
+    expect(Object.keys(result)).toEqual(["status", "diaryEntries"]);
+  });
 });
