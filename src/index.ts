@@ -15,15 +15,36 @@ import { HeartbeatWarmer } from "./heartbeat.js";
 import { loadIdentityContext } from "./identity.js";
 import { compactIdentity } from "./identity-compact.js";
 import { isTimelineQuery, queryTimeline } from "./timeline.js";
+import { MempalaceMemoryRuntime } from "./memory-runtime.js";
+import { buildStatusReport } from "./status-command.js";
 
 interface SessionMessage {
   role?: string;
   content?: unknown;
 }
 
+interface MemoryCapability {
+  promptBuilder?: (params: unknown) => string[];
+  runtime?: unknown;
+}
+
+interface PluginCommandContext {
+  args?: string;
+  [key: string]: unknown;
+}
+
+interface PluginCommandDefinition {
+  name: string;
+  description: string;
+  acceptsArgs?: boolean;
+  requireAuth?: boolean;
+  handler: (ctx: PluginCommandContext) => { text: string } | Promise<{ text: string }>;
+}
+
 interface PluginApi {
-  registerMemoryCapability?: (capability: { promptBuilder?: (params: unknown) => string[] }) => void;
+  registerMemoryCapability?: (capability: MemoryCapability) => void;
   registerMemoryPromptSection?: (fn: (params: unknown) => string[]) => void;
+  registerCommand?: (command: PluginCommandDefinition) => void;
   on?: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => void;
 }
 
@@ -98,6 +119,11 @@ const plugin = {
       kgCache,
       similarityThreshold: cfg.injection.similarityThreshold,
       knownEntities: cfg.injection.knownEntities,
+    });
+
+    const memoryRuntime = new MempalaceMemoryRuntime({
+      mcp,
+      similarityThreshold: cfg.injection.similarityThreshold,
     });
 
     const initPromise = mcp
@@ -293,9 +319,27 @@ const plugin = {
     };
 
     if (typeof api.registerMemoryCapability === "function") {
-      api.registerMemoryCapability({ promptBuilder: builder });
+      api.registerMemoryCapability({ promptBuilder: builder, runtime: memoryRuntime });
     } else if (typeof api.registerMemoryPromptSection === "function") {
       api.registerMemoryPromptSection(builder);
+    }
+
+    if (typeof api.registerCommand === "function") {
+      api.registerCommand({
+        name: "remempalace",
+        description: "Show remempalace memory plugin status (MCP, caches, diary fallback)",
+        acceptsArgs: false,
+        handler: () => ({
+          text: buildStatusReport({
+            mcpReady: mcp.isReady(),
+            hasDiaryWrite: mcp.hasDiaryWrite,
+            hasDiaryRead: mcp.hasDiaryRead,
+            hasKgInvalidate: mcp.hasKgInvalidate,
+            searchCache: searchCache.stats(),
+            kgCache: kgCache.stats(),
+          }),
+        }),
+      });
     }
   },
 };
