@@ -82,7 +82,7 @@ const plugin = {
   id: "remempalace",
   name: "remempalace",
   description: "Full-lifecycle memory plugin for OpenClaw, powered by MemPalace.",
-  async register(api: PluginApi, userConfig?: Partial<RemempalaceConfig>) {
+  register(api: PluginApi, userConfig?: Partial<RemempalaceConfig>) {
     const cfg = mergeConfig(userConfig);
     const logger = createLogger("remempalace");
 
@@ -103,13 +103,15 @@ const plugin = {
       knownEntities: cfg.injection.knownEntities,
     });
 
-    try {
-      await mcp.start();
-      logger.info("MCP client started");
-      mcp.probeCapabilities().catch(() => {});
-    } catch (err) {
-      logger.error(`MCP start failed: ${(err as Error).message}`);
-    }
+    const initPromise = mcp
+      .start()
+      .then(() => {
+        logger.info("MCP client started");
+        mcp.probeCapabilities().catch(() => {});
+      })
+      .catch((err: Error) => {
+        logger.error(`MCP start failed: ${err.message}`);
+      });
 
     const cachedBySession = new Map<string, string[] | null>();
     const sessionMessages = new Map<string, SessionMessage[]>();
@@ -143,6 +145,7 @@ const plugin = {
 
     if (typeof api.on === "function") {
       api.on("session_start", async (_event: unknown, ctx: unknown) => {
+        await initPromise;
         const hctx = ctx as HookContext;
         const key = hctx?.sessionKey ?? "default";
         try {
@@ -195,6 +198,7 @@ const plugin = {
       }
 
       api.on("before_prompt_build", async (event: unknown, ctx: unknown) => {
+        await initPromise;
         const ev = event as PromptBuildEvent;
         const hctx = ctx as HookContext & { modelId?: string; contextWindow?: number };
         const sessionKey = hctx?.sessionKey ?? "default";
