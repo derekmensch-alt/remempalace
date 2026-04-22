@@ -1,5 +1,5 @@
-import type { McpClient } from "./mcp-client.js";
 import { countTokens } from "./token-counter.js";
+import { appendLocalDiary } from "./diary-local.js";
 
 interface SessionMessage {
   role?: string;
@@ -44,21 +44,22 @@ export function summarizeSession(
 }
 
 export function writeDiaryAsync(
-  mcp: McpClient,
-  content: string,
-  wing = "claude_code",
-  room = "general",
+  mcp: { hasDiaryWrite: boolean; callTool: (name: string, args: Record<string, unknown>) => Promise<unknown> },
+  summary: string,
 ): void {
-  void (async () => {
-    try {
-      await mcp.callTool("mempalace_diary_write", {
-        wing,
-        room,
-        content,
-        added_by: "remempalace",
-      });
-    } catch {
-      // fire-and-forget: silently swallow
-    }
-  })();
+  if (mcp.hasDiaryWrite) {
+    void mcp.callTool("mempalace_diary_write", {
+      wing: "remempalace",
+      room: "session",
+      content: summary,
+      added_by: "remempalace",
+    }).catch(() => {});
+  } else {
+    void appendLocalDiary({
+      wing: "remempalace",
+      room: "session",
+      content: summary,
+      ts: new Date().toISOString(),
+    }).catch(() => {});
+  }
 }
