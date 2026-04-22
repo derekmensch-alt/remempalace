@@ -39,6 +39,8 @@ export interface RemempalaceConfig {
     similarityThreshold: number;
     useAaak: boolean;
     knownEntities: string[];
+    identityMaxTokens: number;
+    rawIdentity: boolean;
   };
   tiers: {
     l1Threshold: number;

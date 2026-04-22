@@ -13,6 +13,7 @@ import { KgBatcher, extractFacts } from "./kg.js";
 import { prefetchWakeUp } from "./prefetch.js";
 import { HeartbeatWarmer } from "./heartbeat.js";
 import { loadIdentityContext } from "./identity.js";
+import { compactIdentity } from "./identity-compact.js";
 import { isTimelineQuery, queryTimeline } from "./timeline.js";
 
 interface SessionMessage {
@@ -225,6 +226,16 @@ const plugin = {
 
         if (budget.allowedTiers.length === 0) return;
 
+        // Compact identity and prepend when L0 tier is allowed
+        const start = sessionStartCache.get(sessionKey);
+        const identityCompacted =
+          start?.identity && budget.allowedTiers.includes("L0")
+            ? compactIdentity(start.identity, {
+                maxTokens: cfg.injection.identityMaxTokens,
+                rawIdentity: cfg.injection.rawIdentity,
+              })
+            : "";
+
         try {
           const bundle = await router.readBundle(prompt, 5);
           const kgFacts = normalizeKgResult(bundle.kgResults);
@@ -235,13 +246,18 @@ const plugin = {
             tiers: cfg.tiers,
             useAaak: cfg.injection.useAaak,
           });
-          if (injected.length === 0) return;
-          const lines = [
-            "## Memory Context (remempalace)",
-            "",
-            ...injected,
-            "",
-          ];
+
+          const lines: string[] = [];
+
+          if (identityCompacted) {
+            lines.push("## Identity (remempalace)", "", identityCompacted, "");
+          }
+
+          if (injected.length > 0) {
+            lines.push("## Memory Context (remempalace)", "", ...injected, "");
+          }
+
+          if (lines.length === 0) return;
           cachedBySession.set(sessionKey, lines);
         } catch (err) {
           logger.warn(`recall failed: ${(err as Error).message}`);
@@ -260,14 +276,7 @@ const plugin = {
       const key = p?.sessionKey ?? "default";
       const recallLines = cachedBySession.get(key) ?? [];
       cachedBySession.delete(key);
-      const start = sessionStartCache.get(key);
-      const identityLines: string[] = [];
-      if (start?.identity && (start.identity.soul || start.identity.identity)) {
-        identityLines.push("## Identity (remempalace)", "");
-        if (start.identity.soul) identityLines.push(start.identity.soul, "");
-        if (start.identity.identity) identityLines.push(start.identity.identity, "");
-      }
-      return [...identityLines, ...recallLines];
+      return recallLines;
     };
 
     if (typeof api.registerMemoryCapability === "function") {
