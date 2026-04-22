@@ -22,10 +22,7 @@ interface SessionMessage {
 }
 
 interface PluginApi {
-  registerMemoryCapability?: (
-    pluginId: string,
-    capability: { promptBuilder?: (params: unknown) => string[] },
-  ) => void;
+  registerMemoryCapability?: (capability: { promptBuilder?: (params: unknown) => string[] }) => void;
   registerMemoryPromptSection?: (fn: (params: unknown) => string[]) => void;
   on?: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => void;
 }
@@ -296,7 +293,7 @@ const plugin = {
     };
 
     if (typeof api.registerMemoryCapability === "function") {
-      api.registerMemoryCapability("remempalace", { promptBuilder: builder });
+      api.registerMemoryCapability({ promptBuilder: builder });
     } else if (typeof api.registerMemoryPromptSection === "function") {
       api.registerMemoryPromptSection(builder);
     }
