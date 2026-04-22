@@ -115,6 +115,12 @@ const plugin = {
       { status: unknown; diaryEntries: unknown[]; identity: { soul: string; identity: string } }
     >();
 
+    const budgetManager = new BudgetManager({
+      maxMemoryTokens: cfg.injection.maxTokens,
+      budgetPercent: cfg.injection.budgetPercent,
+      l2BudgetFloor: cfg.tiers.l2BudgetFloor,
+    });
+
     const kgBatcher = cfg.kg.autoLearn
       ? new KgBatcher(mcp, {
           batchSize: cfg.kg.batchSize,
@@ -214,12 +220,7 @@ const plugin = {
           ? ev.messages.reduce((sum, m) => sum + countTokens(extractText(m)), 0)
           : 0;
 
-        const budget = new BudgetManager({
-          contextWindow,
-          maxMemoryTokens: cfg.injection.maxTokens,
-          budgetPercent: cfg.injection.budgetPercent,
-          l2BudgetFloor: cfg.tiers.l2BudgetFloor,
-        }).compute({ conversationTokens });
+        const budget = budgetManager.compute({ conversationTokens, contextWindow });
 
         if (budget.allowedTiers.length === 0) return;
 
