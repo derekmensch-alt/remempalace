@@ -3217,6 +3217,332 @@ Expected: README renders, all files present.
 
 ---
 
+## Phase 7: Revisions
+
+> Added 2026-04-21 by the critique agent (see
+> `docs/superpowers/plans/2026-04-16-remempalace-critique.md`). These tasks
+> close the HIGH/MEDIUM gaps found when the plugin was measured against the
+> live MemPalace MCP server. Verdict: REVISE. Two HIGH-impact correctness
+> items (KG entity-query bug, broken diary tool) plus one HIGH token-cost
+> item (raw identity injection) must land before this project can be called
+> complete. Run these in order — 7.1 / 7.2 / 7.3 first (they are the
+> correctness fixes), then 7.4 / 7.5 / 7.6 for polish.
+
+### Task 7.1: Extract entity candidates before kg_query  [Model: sonnet]
+
+**Why sonnet:** Small but load-bearing change touching router+index, needs a
+real test suite to avoid regressing the existing parallel-fetch behavior.
+
+**Files:**
+- Create: `src/entity-extractor.ts`
+- Create: `tests/entity-extractor.test.ts`
+- Modify: `src/router.ts`
+- Modify: `src/index.ts`
+- Modify: `src/types.ts` (optional — for `EntityExtractionConfig` if added)
+
+**Root cause (from critique #1):** `router.readBundle(prompt, 5)` passes the
+full user prompt as the `entity` arg to `mempalace_kg_query`, which expects an
+entity name. Live testing confirmed `kg_query({entity:"what should I do about
+remempalace today?"})` returns `{facts:[], count:0}`, while the same prompt
+trimmed to `"remempalace"` returns 6 facts. L0 is effectively dead.
+
+- [ ] **Step 1: Write tests first**
+
+Test cases for `extractEntityCandidates(prompt, opts)`:
+- Returns `["Derek"]` for "what is Derek working on today?"
+- Returns `["OpenClaw", "remempalace"]` for "is remempalace running under OpenClaw?"
+- Returns at most `maxCandidates` (default 4)
+- Merges capitalized-word matches with a config whitelist (`knownEntities`)
+- Returns `[]` for prompts with no caps and no whitelist hits
+- Lowercases for matching but returns original-case where it appeared
+
+- [ ] **Step 2: Implement extractor**
+
+```ts
+export interface EntityExtractionOptions {
+  knownEntities: string[]; // whitelist from config, case-insensitive match
+  maxCandidates: number;   // default 4
+  minLength: number;       // default 3 — skip "I", "it"
+}
+
+export function extractEntityCandidates(
+  prompt: string,
+  opts: EntityExtractionOptions,
+): string[];
+```
+
+Implementation: (a) find `/\b[A-Z][\w]{2,}\b/g` capitalized tokens; (b) lowercase
+the prompt and check each known entity as substring; (c) merge, dedup
+case-insensitively preserving first-seen casing, cap at `maxCandidates`.
+
+- [ ] **Step 3: Update MemoryRouter**
+
+Add `kgQueryMulti(entities: string[])` that fans out via `Promise.all`, flattens
+results, dedups by `subject|predicate|object` using `dedupeWithKey`. Keep the
+existing `kgQuery(entity)` for direct/single-entity callers and the integration
+test.
+
+Update `readBundle(prompt, limit)` to call `extractEntityCandidates` (injected
+via options) and use `kgQueryMulti` when candidates exist; fall back to
+`kgQuery(prompt)` only if candidates is empty (so the existing behavior is a
+strict subset when extraction misses).
+
+- [ ] **Step 4: Wire into plugin + config**
+
+Add `knownEntities: string[]` to `RemempalaceConfig.injection` with a default
+of `["Derek", "OpenClaw", "MemPalace", "remempalace", "Anthropic", "Claude"]`.
+Pass into `MemoryRouter` constructor. Bump the router ctor to accept an
+`extractEntities` function so tests can swap it.
+
+- [ ] **Step 5: Verify**
+
+Run `npm test` — all green. Manually call the plugin's recall path against the
+live MCP (`node -e 'await mcp.start(); await router.readBundle("is remempalace
+running?", 5); ...'`) and confirm `kgResults` now has `facts.length > 0`.
+
+**Acceptance criteria:** For prompts containing known entities or capitalized
+names, at least one of them yields non-empty KG facts in >80% of cases when the
+palace has matching data. For prompts with no candidates, behavior is identical
+to before (no regressions).
+
+---
+
+### Task 7.2: Diary health check + local-fallback + upstream report  [Model: sonnet]
+
+**Why sonnet:** Touches MCP client lifecycle, needs careful fallback design
+that survives both upstream fix and continued breakage.
+
+**Files:**
+- Modify: `src/mcp-client.ts`
+- Modify: `src/diary.ts`
+- Modify: `src/index.ts`
+- Create: `tests/diary-fallback.test.ts`
+- Create: `docs/upstream-issue-diary.md` (issue text to file against mempalace)
+
+**Root cause (from critique #2):** `mempalace_diary_write` returns
+`"Internal tool error"` for every arg combo tested (bench 22:05 2026-04-21);
+`mempalace_diary_read` same. `writeDiaryAsync` silently swallows, so the
+failure is invisible and the Phase 3 success criterion is unmet.
+
+- [ ] **Step 1: Probe at MCP startup**
+
+In `McpClient.start` (or a new `probeCapabilities` method called from
+`index.ts` after start), call `diary_write` with a harmless probe
+(`{wing:"remempalace",room:"selftest",content:"probe",added_by:"remempalace"}`)
+and also `diary_read({})`. Store booleans `hasDiaryWrite` / `hasDiaryRead` on
+the client. Log at `warn` level when either fails, including the raw error
+message for triage. Probe runs once per session, not per turn.
+
+- [ ] **Step 2: Fallback to local JSONL when remote diary is broken**
+
+Add `src/diary-local.ts`:
+```ts
+export async function appendLocalDiary(
+  entry: { wing: string; room: string; content: string; ts: string },
+  opts: { dir: string },
+): Promise<void>;
+```
+Writes `JSONL` to `~/.mempalace/palace/diary/<YYYY-MM-DD>.jsonl` (create dir
+if missing). `diary.writeDiaryAsync` should use `mcp.callTool` when
+`hasDiaryWrite` is true, otherwise fall through to `appendLocalDiary`.
+
+- [ ] **Step 3: Surface diary status in `mempalace_status` builder output**
+
+When `hasDiaryWrite === false`, include a one-line warning in the identity
+section at session start (or a dedicated `## System Notes` block) so the user
+sees it once per session: `"remempalace: diary falling back to local JSONL
+(mempalace_diary_write returned Internal tool error)"`. Do not repeat per turn.
+
+- [ ] **Step 4: File upstream issue**
+
+Write `docs/upstream-issue-diary.md` with reproduction: Python version, MCP
+arg combos tried, exact error text, expected behavior. This file is committed
+so we have the full trail even if the upstream issue is closed later.
+
+- [ ] **Step 5: Tests**
+
+Unit: `writeDiaryAsync` calls local fallback when `mcp.hasDiaryWrite === false`.
+Unit: local fallback creates dir, appends JSONL, survives concurrent calls.
+
+**Acceptance criteria:** `ls ~/.mempalace/palace/diary/*.jsonl` shows a fresh
+entry after any real session ends when upstream diary is broken. When upstream
+is fixed, flipping `hasDiaryWrite=true` routes back to MCP automatically with
+no code change. No silent failures.
+
+---
+
+### Task 7.3: AAAK-compressed identity through BudgetManager  [Model: sonnet]
+
+**Why sonnet:** Requires writing an identity-compaction step and re-wiring
+the builder; easy to under-compact or over-compact.
+
+**Files:**
+- Modify: `src/identity.ts`
+- Create: `src/identity-compact.ts`
+- Create: `tests/identity-compact.test.ts`
+- Modify: `src/index.ts`
+- Modify: `src/types.ts` (add `injection.identityMaxTokens`, `injection.rawIdentity`)
+
+**Root cause (from critique #3):** `index.ts:262-268` unconditionally prepends
+raw SOUL.md + IDENTITY.md (up to ~1000 tokens) to the builder output,
+bypassing `BudgetManager`, AAAK compression, and the
+"skip-when-context-full" rule. Baseline injection exceeds the 150-300 token
+target before L0/L1/L2 content is even considered.
+
+- [ ] **Step 1: Design the compaction**
+
+Convert SOUL.md / IDENTITY.md into an AAAK fact block at session start:
+```
+IDENT: Derek | role=principal | stack=typescript,python,rust | ...
+VALUES: direct | low-bs | build-to-learn | ...
+CURRENT: project=remempalace | goal=ship-phase-7
+```
+Target ≤150 tokens total. Extraction can be regex + headings (no LLM — that
+violates the speed/cost constraint per design §9).
+
+- [ ] **Step 2: Implement `compactIdentity`**
+
+```ts
+export function compactIdentity(
+  raw: { soul: string; identity: string },
+  opts: { maxTokens: number },
+): string;
+```
+- Parse `#`/`##` headings for section labels
+- Collect bullet lines, join with `|`
+- Truncate to `maxTokens` via `countTokens`
+- Return single string ready to inject as one L0 line
+
+- [ ] **Step 3: Route through BudgetManager**
+
+In `index.ts` `before_prompt_build`:
+- Read compacted identity from `sessionStartCache`
+- If `budget.allowedTiers.includes("L0")` and the compacted identity fits in
+  the L0 token budget, prepend it to the injected lines
+- Otherwise skip (respect the 80%-full rule)
+
+Remove the direct identity-dumping block from the `builder` function. The
+builder should only return what was staged by the hook.
+
+- [ ] **Step 4: Config knobs**
+
+Add to `RemempalaceConfig.injection`:
+- `identityMaxTokens: number` (default 150)
+- `rawIdentity: boolean` (default false — keep the old dump-the-markdown
+  behavior available only when explicitly enabled, for debugging)
+
+- [ ] **Step 5: Tests**
+
+Unit: `compactIdentity` stays within `maxTokens`, preserves key sections.
+Integration: per-turn injection with identity + empty KG + empty search
+should be ≤200 tokens (vs. ~1000 today).
+
+**Acceptance criteria:** Measured per-turn injection size (excluding the turn
+header) drops to 150-300 tokens in the typical case. Identity is elided when
+context is >80% full.
+
+---
+
+### Task 7.4: Prefetch ChromaDB warm-up  [Model: haiku]
+
+**Why haiku:** One-line parallel-call addition, no design work.
+
+**Files:**
+- Modify: `src/prefetch.ts`
+- Modify: `tests/prefetch.test.ts`
+
+**Root cause (from critique #4):** Measured prefetch (status + diary_read in
+parallel) was 230.7ms, exceeding the design's 100ms target. The first real
+`mempalace_search` after that was 208ms while subsequent warm searches ran at
+12-13ms — ChromaDB cold-start dominates.
+
+- [ ] **Step 1: Add warmup search to `prefetchWakeUp`**
+
+```ts
+const [status, diary, _warmup] = await Promise.all([
+  safe(mcp.callTool("mempalace_status", {}), null),
+  safe(mcp.callTool("mempalace_diary_read", { limit: diaryCount }), []),
+  safe(mcp.callTool("mempalace_search", { query: "__warmup__", limit: 1 }), null),
+]);
+```
+Do not surface the warmup result. Its only job is to trigger ChromaDB load.
+
+- [ ] **Step 2: Update tests**
+
+Mock 3 parallel calls; assert all three fire concurrently and that the
+returned `PrefetchResult` shape is unchanged (no `warmup` field leaks).
+
+**Acceptance criteria:** First real search after prefetch measures <50ms p95
+against the live server. Prefetch itself is allowed to be ~250ms (it runs
+in parallel with the session-start hook, not on the critical turn path).
+
+---
+
+### Task 7.5: KG invalidation pathway (feature-flagged)  [Model: sonnet]
+
+**Why sonnet:** Needs contradiction-detection logic and careful gating so
+the broken upstream tool doesn't spam errors.
+
+**Files:**
+- Modify: `src/kg.ts`
+- Create: `tests/kg-invalidate.test.ts`
+- Modify: `src/types.ts` (add `kg.invalidateOnConflict: boolean`)
+
+**Root cause (from critique #5):** Phase 4 lists invalidation as a
+deliverable. Zero references to `kg_invalidate` exist in `src/`. Live
+`kg_invalidate` tool also returns `"Internal tool error"` right now so this
+must ship feature-flagged OFF until upstream is fixed (dependency on 7.2's
+upstream work).
+
+- [ ] **Step 1: Add contradiction detection to `KgBatcher.flush`**
+
+Before each `kg_add`, query `kg_query({entity: fact.subject})`. For each
+existing fact with the same `subject+predicate` but different `object` and
+`current:true`, call `kg_invalidate({subject, predicate, object: oldObject})`
+first. Only fire if `config.kg.invalidateOnConflict` is true AND the MCP
+client reports `hasKgInvalidate=true` (add capability probe alongside the
+diary one from 7.2).
+
+- [ ] **Step 2: Tests**
+
+Unit: Given a cached KG with `Derek | favorite_model | Kimi K2.5`, adding
+`Derek | favorite_model | Kimi K3.0` should fire `kg_invalidate` for K2.5
+then `kg_add` for K3.0. Adding `Derek | favorite_model | Kimi K2.5` again
+(same object) should NOT fire invalidate.
+
+- [ ] **Step 3: Default the flag OFF**
+
+`config.kg.invalidateOnConflict: false` until 7.2 reports upstream is healthy.
+Document in README.
+
+**Acceptance criteria:** Flag-on integration test (against a fixed, healthy
+upstream or a mock) shows stale facts invalidated and new facts added in a
+single atomic batch. Flag-off path is a no-op (bit-for-bit identical to
+current behavior).
+
+---
+
+### Task 7.6: Hoist BudgetManager out of the hot path  [Model: haiku]
+
+**Why haiku:** Three-line move.
+
+**Files:**
+- Modify: `src/index.ts`
+
+**Root cause (from critique #6):** `index.ts:217-222` constructs a new
+`BudgetManager` on every `before_prompt_build`. Its constructor args are
+constant for the lifetime of the plugin.
+
+- [ ] **Step 1:** Hoist `const budgetManager = new BudgetManager({...})`
+above the hook registration. Per-turn: just `budgetManager.compute({
+conversationTokens })`.
+
+- [ ] **Step 2:** Verify `npm test` still passes.
+
+**Acceptance criteria:** No behavior change. One less allocation per turn.
+
+---
+
 ## Migration & Cutover
 
 ### Task M.1: Remove mempalace-auto-recall  [Model: haiku]
