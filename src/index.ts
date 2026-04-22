@@ -10,6 +10,10 @@ import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
 import { summarizeSession, writeDiaryAsync } from "./diary.js";
 import { KgBatcher, extractFacts } from "./kg.js";
+import { prefetchWakeUp } from "./prefetch.js";
+import { HeartbeatWarmer } from "./heartbeat.js";
+import { loadIdentityContext } from "./identity.js";
+import { isTimelineQuery, queryTimeline } from "./timeline.js";
 
 interface SessionMessage {
   role?: string;
@@ -106,8 +110,47 @@ const plugin = {
 
     const cachedBySession = new Map<string, string[] | null>();
     const sessionMessages = new Map<string, SessionMessage[]>();
+    const sessionStartCache = new Map<
+      string,
+      { status: unknown; diaryEntries: unknown[]; identity: { soul: string; identity: string } }
+    >();
+
+    const kgBatcher = cfg.kg.autoLearn
+      ? new KgBatcher(mcp, {
+          batchSize: cfg.kg.batchSize,
+          flushIntervalMs: cfg.kg.flushIntervalMs,
+        })
+      : null;
+
+    const heartbeat = new HeartbeatWarmer({
+      intervalMs: 30 * 60 * 1000,
+      warm: async () => {
+        await prefetchWakeUp(mcp, { diaryCount: cfg.prefetch.diaryCount });
+      },
+    });
+    heartbeat.start();
 
     if (typeof api.on === "function") {
+      api.on("session_start", async (_event: unknown, ctx: unknown) => {
+        const hctx = ctx as HookContext;
+        const key = hctx?.sessionKey ?? "default";
+        try {
+          const [prefetch, identity] = await Promise.all([
+            prefetchWakeUp(mcp, { diaryCount: cfg.prefetch.diaryCount }),
+            cfg.prefetch.identityEntities
+              ? loadIdentityContext({
+                  soulPath: "/home/derek/SOUL.md",
+                  identityPath: "/home/derek/IDENTITY.md",
+                  maxChars: 2000,
+                })
+              : Promise.resolve({ soul: "", identity: "" }),
+          ]);
+          sessionStartCache.set(key, { ...prefetch, identity });
+        } catch (err) {
+          logger.warn(`session_start prefetch failed: ${(err as Error).message}`);
+        }
+      });
+
       api.on("llm_input", (event: unknown, ctx: unknown) => {
         const ev = event as { historyMessages?: unknown[] };
         const hctx = ctx as HookContext;
@@ -129,14 +172,7 @@ const plugin = {
         });
       }
 
-      const kgBatcher = cfg.kg.autoLearn
-        ? new KgBatcher(mcp, {
-            batchSize: cfg.kg.batchSize,
-            flushIntervalMs: cfg.kg.flushIntervalMs,
-          })
-        : null;
-
-      if (typeof api.on === "function" && kgBatcher) {
+      if (kgBatcher) {
         api.on("llm_output", (event: unknown) => {
           const ev = event as { assistantTexts?: string[] };
           if (!ev.assistantTexts) return;
@@ -154,6 +190,24 @@ const plugin = {
         cachedBySession.set(sessionKey, null);
         const prompt = resolvePrompt(ev);
         if (!prompt || prompt.length < 10) return;
+
+        // Timeline branch: bypass tiered recall for temporal queries
+        if (isTimelineQuery(prompt)) {
+          try {
+            const tl = await queryTimeline(mcp, { daysBack: 7 });
+            const lines = [
+              "## Timeline Context (remempalace)",
+              "",
+              ...tl.diary.map((d) => `- ${d.date}: ${d.content.slice(0, 200)}`),
+              ...tl.events.map((e) => `- ${e.date}: ${e.fact}`),
+              "",
+            ];
+            cachedBySession.set(sessionKey, lines);
+            return;
+          } catch (err) {
+            logger.warn(`timeline query failed: ${(err as Error).message}`);
+          }
+        }
 
         const contextWindow = hctx.contextWindow ?? 200000;
         const conversationTokens = ev.messages
@@ -191,14 +245,27 @@ const plugin = {
           logger.warn(`recall failed: ${(err as Error).message}`);
         }
       });
+
+      api.on("gateway_stop", async () => {
+        heartbeat.stop();
+        if (kgBatcher) await kgBatcher.stop();
+        await mcp.stop();
+      });
     }
 
     const builder = (params: unknown) => {
       const p = params as { sessionKey?: string };
       const key = p?.sessionKey ?? "default";
-      const lines = cachedBySession.get(key) ?? null;
+      const recallLines = cachedBySession.get(key) ?? [];
       cachedBySession.delete(key);
-      return lines ?? [];
+      const start = sessionStartCache.get(key);
+      const identityLines: string[] = [];
+      if (start?.identity && (start.identity.soul || start.identity.identity)) {
+        identityLines.push("## Identity (remempalace)", "");
+        if (start.identity.soul) identityLines.push(start.identity.soul, "");
+        if (start.identity.identity) identityLines.push(start.identity.identity, "");
+      }
+      return [...identityLines, ...recallLines];
     };
 
     if (typeof api.registerMemoryCapability === "function") {
