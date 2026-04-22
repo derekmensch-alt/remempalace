@@ -8,6 +8,7 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
     budgetPercent: 0.15,
     similarityThreshold: 0.25,
     useAaak: true,
+    knownEntities: ["Derek", "OpenClaw", "MemPalace", "remempalace", "Anthropic", "Claude"],
   },
   tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
   diary: { enabled: true, maxEntryTokens: 500 },

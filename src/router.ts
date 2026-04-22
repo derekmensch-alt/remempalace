@@ -1,6 +1,8 @@
 import { MemoryCache, hashKey } from "./cache.js";
 import type { McpClient } from "./mcp-client.js";
-import type { SearchResult } from "./types.js";
+import type { SearchResult, KgFact } from "./types.js";
+import { dedupeWithKey } from "./dedup.js";
+import { extractEntityCandidates } from "./entity-extractor.js";
 
 export interface MemoryRouterOptions {
   mcp: McpClient;
@@ -8,6 +10,7 @@ export interface MemoryRouterOptions {
   kgCache: MemoryCache<unknown>;
   similarityThreshold: number;
   callTimeoutMs?: number;
+  knownEntities?: string[];
 }
 
 export interface ReadBundle {
@@ -15,11 +18,22 @@ export interface ReadBundle {
   kgResults: unknown;
 }
 
+function normalizeKgResult(raw: unknown): KgFact[] {
+  if (!raw || typeof raw !== "object") return [];
+  if (Array.isArray(raw)) return raw as KgFact[];
+  if ("facts" in raw && Array.isArray((raw as { facts: unknown[] }).facts)) {
+    return (raw as { facts: KgFact[] }).facts;
+  }
+  return [];
+}
+
 export class MemoryRouter {
   private readonly timeoutMs: number;
+  private readonly knownEntities: string[];
 
   constructor(private readonly opts: MemoryRouterOptions) {
     this.timeoutMs = opts.callTimeoutMs ?? 8000;
+    this.knownEntities = opts.knownEntities ?? [];
   }
 
   async search(query: string, limit: number): Promise<SearchResult[]> {
@@ -51,10 +65,29 @@ export class MemoryRouter {
     return raw;
   }
 
-  async readBundle(query: string, limit: number): Promise<ReadBundle> {
+  async kgQueryMulti(entities: string[]): Promise<unknown> {
+    const results = await Promise.all(entities.map((e) => this.kgQuery(e)));
+    const facts = results.flatMap((r) => normalizeKgResult(r));
+    return dedupeWithKey(facts, (f) => `${f.subject}|${f.predicate}|${f.object}`);
+  }
+
+  extractCandidates(prompt: string): string[] {
+    return extractEntityCandidates(prompt, {
+      knownEntities: this.knownEntities,
+      maxCandidates: 4,
+      minLength: 3,
+    });
+  }
+
+  async readBundle(
+    query: string,
+    limit: number,
+    opts?: { entityCandidates?: string[] },
+  ): Promise<ReadBundle> {
+    const candidates = opts?.entityCandidates ?? this.extractCandidates(query);
     const [searchResults, kgResults] = await Promise.all([
       this.search(query, limit),
-      this.kgQuery(query),
+      candidates.length > 0 ? this.kgQueryMulti(candidates) : this.kgQuery(query),
     ]);
     return { searchResults, kgResults };
   }

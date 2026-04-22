@@ -99,6 +99,7 @@ const plugin = {
       searchCache,
       kgCache,
       similarityThreshold: cfg.injection.similarityThreshold,
+      knownEntities: cfg.injection.knownEntities,
     });
 
     try {
