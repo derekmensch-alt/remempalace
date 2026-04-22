@@ -38,6 +38,8 @@ export interface RemempalaceConfig {
     budgetPercent: number;
     similarityThreshold: number;
     useAaak: boolean;
+    identityMaxTokens: number;   // default 150
+    rawIdentity: boolean;        // default false
   };
   tiers: {
     l1Threshold: number;
