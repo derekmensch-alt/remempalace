@@ -28,6 +28,14 @@ export class ProcessManager {
     this.proc.stderr.on("data", (chunk: string) => {
       for (const h of this.stderrHandlers) h(chunk);
     });
+    this.proc.stdin.on("error", (err: NodeJS.ErrnoException) => {
+      const note = `[stdin error: ${err.code ?? "ERR"} ${err.message}]\n`;
+      for (const h of this.stderrHandlers) h(note);
+    });
+    this.proc.on("error", (err) => {
+      const note = `[spawn error: ${err.message}]\n`;
+      for (const h of this.stderrHandlers) h(note);
+    });
     this.proc.on("exit", (code) => {
       for (const h of this.exitHandlers) h(code);
       this.proc = null;
@@ -52,7 +60,15 @@ export class ProcessManager {
 
   writeStdin(data: string): void {
     if (!this.proc) throw new Error("Process not started");
-    this.proc.stdin.write(data);
+    if (!this.proc.stdin.writable) {
+      throw new Error("Process stdin not writable (child likely exited)");
+    }
+    this.proc.stdin.write(data, (err) => {
+      if (!err) return;
+      const e = err as NodeJS.ErrnoException;
+      const note = `[stdin write callback: ${e.code ?? "ERR"} ${e.message}]\n`;
+      for (const h of this.stderrHandlers) h(note);
+    });
   }
 
   onStdout(handler: (data: string) => void): void {

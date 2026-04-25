@@ -55,6 +55,11 @@ interface PluginCommandDefinition {
 }
 
 interface PluginApi {
+  config?: {
+    plugins?: {
+      entries?: Record<string, { config?: Partial<RemempalaceConfig> }>;
+    };
+  };
   registerMemoryCapability?: (capability: MemoryCapability) => void;
   registerMemoryPromptSection?: (fn: (params: unknown) => string[]) => void;
   registerCommand?: (command: PluginCommandDefinition) => void;
@@ -62,6 +67,16 @@ interface PluginApi {
     event: string,
     handler: (event: unknown, ctx: unknown) => Promise<unknown> | unknown,
   ) => void;
+}
+
+export function resolvePluginUserConfig(
+  api: PluginApi | undefined,
+  fallback: Partial<RemempalaceConfig> | undefined,
+  pluginId: string,
+): Partial<RemempalaceConfig> | undefined {
+  const fromApi = api?.config?.plugins?.entries?.[pluginId]?.config;
+  if (fromApi && Object.keys(fromApi).length > 0) return fromApi;
+  return fallback;
 }
 
 interface PromptBuildEvent {
@@ -117,8 +132,10 @@ const plugin = {
   name: "remempalace",
   description: "Full-lifecycle memory plugin for OpenClaw, powered by MemPalace.",
   register(api: PluginApi, userConfig?: Partial<RemempalaceConfig>) {
-    const cfg = mergeConfig(userConfig);
+    const resolved = resolvePluginUserConfig(api, userConfig, "remempalace");
+    const cfg = mergeConfig(resolved);
     const logger = createLogger("remempalace");
+    logger.info(`config resolved: pythonBin=${cfg.mcpPythonBin}`);
 
     const mcp = new McpClient({ pythonBin: cfg.mcpPythonBin });
     const searchCache = new MemoryCache<SearchResult[]>({

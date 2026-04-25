@@ -40,7 +40,14 @@ export class McpClient {
       args: ["-m", "mempalace.mcp_server"],
     });
     this.pm.onStdout((chunk) => this.onChunk(chunk));
-    this.pm.onExit(() => this.failAllPending());
+    this.pm.onStderr((chunk) => {
+      const trimmed = chunk.trim();
+      if (trimmed.length > 0) console.warn(`[remempalace:mcp-stderr] ${trimmed}`);
+    });
+    this.pm.onExit((code) => {
+      console.warn(`[remempalace:mcp-exit] python child exited code=${code}`);
+      this.failAllPending();
+    });
   }
 
   async start(): Promise<void> {
