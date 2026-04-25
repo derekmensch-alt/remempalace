@@ -1,4 +1,13 @@
 import type { RemempalaceConfig } from "./types.js";
+import { homedir } from "node:os";
+
+function expandTilde(path: string): string {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) {
+    return `${homedir()}${path.slice(1)}`;
+  }
+  return path;
+}
 
 export const DEFAULT_CONFIG: RemempalaceConfig = {
   mcpPythonBin: "/home/derek/.local/share/pipx/venvs/mempalace/bin/python",
@@ -16,12 +25,35 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
   diary: { enabled: true, maxEntryTokens: 500 },
   kg: { autoLearn: true, batchSize: 5, flushIntervalMs: 30000, invalidateOnConflict: false },
   prefetch: { diaryCount: 3, identityEntities: true },
+  identity: {
+    soulPath: `${homedir()}/SOUL.md`,
+    identityPath: `${homedir()}/IDENTITY.md`,
+    maxChars: 2000,
+  },
+  memoryRuntime: {
+    allowedReadRoots: [`${homedir()}/.mempalace`, `${homedir()}/.openclaw/workspace`],
+  },
 };
 
 export function mergeConfig(
   user: Partial<RemempalaceConfig> | undefined,
 ): RemempalaceConfig {
   if (!user) return DEFAULT_CONFIG;
+
+  const mergedIdentity = { ...DEFAULT_CONFIG.identity, ...user.identity };
+  const identity = {
+    soulPath: expandTilde(mergedIdentity.soulPath),
+    identityPath: expandTilde(mergedIdentity.identityPath),
+    maxChars: mergedIdentity.maxChars,
+  };
+
+  const userRoots = user.memoryRuntime?.allowedReadRoots;
+  const memoryRuntime = {
+    allowedReadRoots: userRoots
+      ? userRoots.map(expandTilde)
+      : DEFAULT_CONFIG.memoryRuntime.allowedReadRoots,
+  };
+
   return {
     mcpPythonBin: user.mcpPythonBin ?? DEFAULT_CONFIG.mcpPythonBin,
     cache: { ...DEFAULT_CONFIG.cache, ...user.cache },
@@ -30,5 +62,7 @@ export function mergeConfig(
     diary: { ...DEFAULT_CONFIG.diary, ...user.diary },
     kg: { ...DEFAULT_CONFIG.kg, ...user.kg },
     prefetch: { ...DEFAULT_CONFIG.prefetch, ...user.prefetch },
+    identity,
+    memoryRuntime,
   };
 }

@@ -59,36 +59,33 @@ export class McpClient {
 
   async probeCapabilities(): Promise<void> {
     try {
-      await this.callTool("mempalace_diary_write", {
-        wing: "remempalace",
-        room: "selftest",
-        content: "probe",
-        added_by: "remempalace",
-      });
-      this.hasDiaryWrite = true;
+      const resp = await this.call("tools/list", {});
+      const rawTools = (resp.result as { tools?: unknown })?.tools;
+      if (!Array.isArray(rawTools)) {
+        console.warn(
+          "[remempalace] tools/list returned unexpected shape — capabilities default to false",
+        );
+        this.hasDiaryWrite = false;
+        this.hasDiaryRead = false;
+        this.hasKgInvalidate = false;
+        return;
+      }
+      const toolNames = new Set(
+        rawTools
+          .map((t) => (t as { name?: unknown })?.name)
+          .filter((n): n is string => typeof n === "string"),
+      );
+      this.hasDiaryWrite = toolNames.has("mempalace_diary_write");
+      this.hasDiaryRead = toolNames.has("mempalace_diary_read");
+      this.hasKgInvalidate = toolNames.has("mempalace_kg_invalidate");
     } catch (err) {
-      console.warn(`[remempalace] mempalace_diary_write probe failed: ${(err as Error).message}`);
-    }
-
-    try {
-      await this.callTool("mempalace_diary_read", {
-        wing: "remempalace",
-        room: "selftest",
-      });
-      this.hasDiaryRead = true;
-    } catch (err) {
-      console.warn(`[remempalace] mempalace_diary_read probe failed: ${(err as Error).message}`);
-    }
-
-    try {
-      await this.callTool("mempalace_kg_invalidate", {
-        subject: "__probe__",
-        predicate: "__probe__",
-        object: "__probe__",
-      });
-      this.hasKgInvalidate = true;
-    } catch {
-      // upstream broken — leave false
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[remempalace] tools/list probe failed — capabilities default to false: ${message}`,
+      );
+      this.hasDiaryWrite = false;
+      this.hasDiaryRead = false;
+      this.hasKgInvalidate = false;
     }
   }
 

@@ -1,5 +1,18 @@
+import { promises as fs } from "node:fs";
 import { mergeConfig } from "./config.js";
 import { createLogger } from "./logger.js";
+
+const DEBUG_PATH = "/tmp/remempalace-last-inject.log";
+async function debugLog(label: string, data: unknown): Promise<void> {
+  if (process.env.REMEMPALACE_DEBUG !== "1") return;
+  try {
+    const ts = new Date().toISOString();
+    const body = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    await fs.appendFile(DEBUG_PATH, `\n==== ${ts} ${label} ====\n${body}\n`);
+  } catch {
+    // swallow
+  }
+}
 import { MemoryCache } from "./cache.js";
 import { McpClient } from "./mcp-client.js";
 import { MemoryRouter } from "./router.js";
@@ -45,7 +58,10 @@ interface PluginApi {
   registerMemoryCapability?: (capability: MemoryCapability) => void;
   registerMemoryPromptSection?: (fn: (params: unknown) => string[]) => void;
   registerCommand?: (command: PluginCommandDefinition) => void;
-  on?: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => void;
+  on?: (
+    event: string,
+    handler: (event: unknown, ctx: unknown) => Promise<unknown> | unknown,
+  ) => void;
 }
 
 interface PromptBuildEvent {
@@ -124,6 +140,7 @@ const plugin = {
     const memoryRuntime = new MempalaceMemoryRuntime({
       mcp,
       similarityThreshold: cfg.injection.similarityThreshold,
+      allowedReadRoots: cfg.memoryRuntime.allowedReadRoots,
     });
 
     const initPromise = mcp
@@ -176,9 +193,9 @@ const plugin = {
             prefetchWakeUp(mcp, { diaryCount: cfg.prefetch.diaryCount }),
             cfg.prefetch.identityEntities
               ? loadIdentityContext({
-                  soulPath: "/home/derek/SOUL.md",
-                  identityPath: "/home/derek/IDENTITY.md",
-                  maxChars: 2000,
+                  soulPath: cfg.identity.soulPath,
+                  identityPath: cfg.identity.identityPath,
+                  maxChars: cfg.identity.maxChars,
                 })
               : Promise.resolve({ soul: "", identity: "" }),
           ]);
@@ -227,7 +244,17 @@ const plugin = {
         const sessionKey = hctx?.sessionKey ?? "default";
         cachedBySession.set(sessionKey, null);
         const prompt = resolvePrompt(ev);
-        if (!prompt || prompt.length < 10) return;
+        await debugLog("before_prompt_build:enter", {
+          sessionKey,
+          promptLen: prompt.length,
+          promptPreview: prompt.slice(0, 200),
+          modelId: hctx?.modelId,
+          contextWindow: hctx?.contextWindow,
+        });
+        if (!prompt || prompt.length < 10) {
+          await debugLog("before_prompt_build:skip-short-prompt", { sessionKey, promptLen: prompt.length });
+          return;
+        }
 
         // Timeline branch: bypass tiered recall for temporal queries
         if (isTimelineQuery(prompt)) {
@@ -241,7 +268,12 @@ const plugin = {
               "",
             ];
             cachedBySession.set(sessionKey, lines);
-            return;
+            const block = lines.join("\n");
+            await debugLog("before_prompt_build:timeline-returning", {
+              sessionKey,
+              blockLen: block.length,
+            });
+            return { prependSystemContext: block };
           } catch (err) {
             logger.warn(`timeline query failed: ${(err as Error).message}`);
           }
@@ -267,7 +299,29 @@ const plugin = {
             : "";
 
         try {
-          const bundle = await router.readBundle(prompt, 5);
+          const candidates = router.extractCandidates(prompt);
+          if (process.env.REMEMPALACE_DEBUG === "1") {
+            await debugLog("before_prompt_build:candidates", {
+              sessionKey,
+              promptFull: prompt.slice(0, 3000),
+              promptLen: prompt.length,
+              candidates,
+            });
+            const perEntityKg = await Promise.all(
+              candidates.map(async (c) => {
+                try {
+                  const raw = await router.kgQuery(c);
+                  const facts = normalizeKgResult(raw);
+                  return { entity: c, rawFactsCount: facts.length, rawSample: facts.slice(0, 2) };
+                } catch (e) {
+                  const message = e instanceof Error ? e.message : String(e);
+                  return { entity: c, rawFactsCount: -1, rawSample: message };
+                }
+              }),
+            );
+            await debugLog("before_prompt_build:per-entity-kg", { sessionKey, perEntityKg });
+          }
+          const bundle = await router.readBundle(prompt, 5, { entityCandidates: candidates });
           const kgFacts = normalizeKgResult(bundle.kgResults);
           const injected = buildTieredInjection({
             kgFacts,
@@ -287,9 +341,35 @@ const plugin = {
             lines.push("## Memory Context (remempalace)", "", ...injected, "");
           }
 
+          await debugLog("before_prompt_build:assembled", {
+            sessionKey,
+            kgFactCount: kgFacts.length,
+            searchResultCount: bundle.searchResults.length,
+            injectedLineCount: injected.length,
+            identityIncluded: identityCompacted.length > 0,
+            budget,
+            finalLineCount: lines.length,
+            finalBlock: lines.join("\n"),
+          });
           if (lines.length === 0) return;
           cachedBySession.set(sessionKey, lines);
+
+          // Return the block as prependSystemContext — openclaw's
+          // before_prompt_build dispatcher reads the handler's return value and
+          // merges {systemPrompt, prependContext, prependSystemContext,
+          // appendSystemContext} into the outgoing prompt. Event mutation is
+          // ignored; only the return shape flows through.
+          //   selection-DmkxuIQC.js:4033 resolvePromptBuildHookResult
+          //   hook-runner-global-CImEMsgK.js:54 mergeBeforePromptBuild
+          const block = lines.join("\n");
+          await debugLog("before_prompt_build:returning", {
+            sessionKey,
+            blockLen: block.length,
+            channel: "prependSystemContext",
+          });
+          return { prependSystemContext: block };
         } catch (err) {
+          await debugLog("before_prompt_build:error", { sessionKey, error: (err as Error).message });
           logger.warn(`recall failed: ${(err as Error).message}`);
         }
       });
@@ -306,16 +386,24 @@ const plugin = {
       const key = p?.sessionKey ?? "default";
       const recallLines = cachedBySession.get(key) ?? [];
       cachedBySession.delete(key);
-      if (!mcp.hasDiaryWrite) {
-        return [
-          ...recallLines,
-          "## System Notes (remempalace)",
-          "",
-          "diary: falling back to local JSONL (~/.mempalace/palace/diary/) — mempalace_diary_write returned Internal tool error",
-          "",
-        ];
-      }
-      return recallLines;
+      const out = !mcp.hasDiaryWrite
+        ? [
+            ...recallLines,
+            "## System Notes (remempalace)",
+            "",
+            "diary: falling back to local JSONL (~/.mempalace/palace/diary/) — mempalace_diary_write returned Internal tool error",
+            "",
+          ]
+        : recallLines;
+      void debugLog("builder:called", {
+        sessionKey: key,
+        paramKeys: params && typeof params === "object" ? Object.keys(params) : null,
+        recallLineCount: recallLines.length,
+        hasDiaryWrite: mcp.hasDiaryWrite,
+        outLineCount: out.length,
+        outBlock: out.join("\n"),
+      });
+      return out;
     };
 
     if (typeof api.registerMemoryCapability === "function") {

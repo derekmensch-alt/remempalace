@@ -12,6 +12,7 @@ export interface KgFact {
   object: string;
   valid_from?: string;
   valid_to?: string;
+  current?: boolean;
 }
 
 export interface DiaryEntry {
@@ -60,6 +61,14 @@ export interface RemempalaceConfig {
   prefetch: {
     diaryCount: number;
     identityEntities: boolean;
+  };
+  identity: {
+    soulPath: string;
+    identityPath: string;
+    maxChars: number;
+  };
+  memoryRuntime: {
+    allowedReadRoots: string[];
   };
 }
 

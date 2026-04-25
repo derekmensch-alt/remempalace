@@ -21,7 +21,7 @@ export async function prefetchWakeUp(
       return fallback;
     }
   };
-  const [statusResult, diaryResult] = await Promise.all([
+  const [statusResult, diaryResult, _warmupResult] = await Promise.all([
     safe(mcp.callTool<PalaceStatus>("mempalace_status", {}), null),
     safe(
       mcp.callTool<unknown[]>("mempalace_diary_read", { limit: opts.diaryCount }),

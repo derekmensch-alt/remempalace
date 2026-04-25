@@ -1,5 +1,5 @@
 import type { InjectionBudget, KgFact, SearchResult } from "./types.js";
-import { formatKgFactsAaak, formatSearchResult } from "./aaak.js";
+import { formatKgFact, formatSearchResult } from "./aaak.js";
 import { countTokens } from "./token-counter.js";
 import { dedupeByContent } from "./dedup.js";
 
@@ -9,6 +9,20 @@ export interface TieredInjectionParams {
   budget: InjectionBudget;
   tiers: { l1Threshold: number; l2Threshold: number; l2BudgetFloor: number };
   useAaak: boolean;
+}
+
+function rankKgFacts(facts: KgFact[]): KgFact[] {
+  return facts
+    .filter((f) => f.current !== false)
+    .slice()
+    .sort((a, b) => {
+      const av = a.valid_from ?? "";
+      const bv = b.valid_from ?? "";
+      if (av && !bv) return -1;
+      if (!av && bv) return 1;
+      if (av === bv) return 0;
+      return av < bv ? 1 : -1;
+    });
 }
 
 export function buildTieredInjection(params: TieredInjectionParams): string[] {
@@ -26,10 +40,24 @@ export function buildTieredInjection(params: TieredInjectionParams): string[] {
     tokensUsed += countTokens(line);
   };
 
-  // L0: KG facts
+  // L0: KG facts — filter to current, sort newest-first, greedy pack per-fact so a tight
+  // budget still yields the most recent authoritative facts instead of dropping the whole tier.
+  // Only emit the header if at least one fact will actually fit beneath it; otherwise a
+  // very tight budget would leave a semantically empty labelled block.
   if (budget.allowedTiers.includes("L0") && kgFacts.length > 0) {
-    const factsLine = `FACTS: ${formatKgFactsAaak(kgFacts)}`;
-    if (canAdd(factsLine)) add(factsLine);
+    const ranked = rankKgFacts(kgFacts);
+    if (ranked.length > 0) {
+      const header = "KG FACTS (authoritative, newest first):";
+      const firstLine = `- ${formatKgFact(ranked[0])}`;
+      if (countTokens(header) + countTokens(firstLine) <= budget.maxTokens) {
+        add(header);
+        for (const fact of ranked) {
+          const line = `- ${formatKgFact(fact)}`;
+          if (canAdd(line)) add(line);
+          else break;
+        }
+      }
+    }
   }
 
   // L1: top hits above l1Threshold
