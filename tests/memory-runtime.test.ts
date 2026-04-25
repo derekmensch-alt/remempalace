@@ -58,7 +58,7 @@ describe("MempalaceMemoryRuntime", () => {
             wing: "tools",
             room: "openclaw",
             similarity: 0.82,
-            source_file: "/home/derek/.mempalace/palace/tools/openclaw.md",
+            source_file: "/fixtures/palace/tools/openclaw.md",
           },
         ],
       });
@@ -72,7 +72,7 @@ describe("MempalaceMemoryRuntime", () => {
       );
       expect(results).toHaveLength(1);
       expect(results[0]).toMatchObject({
-        path: "/home/derek/.mempalace/palace/tools/openclaw.md",
+        path: "/fixtures/palace/tools/openclaw.md",
         score: 0.82,
         snippet: "Derek uses OpenClaw",
         source: "memory",

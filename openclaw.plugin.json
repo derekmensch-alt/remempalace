@@ -9,8 +9,8 @@
     "properties": {
       "mcpPythonBin": {
         "type": "string",
-        "description": "Path to Python binary in the mempalace virtualenv",
-        "default": "/home/derek/.local/share/pipx/venvs/mempalace/bin/python"
+        "description": "Path to the Python binary that has the `mempalace` package installed. Defaults to `python3` on PATH; pipx users should point this at their venv python (e.g. ~/.local/share/pipx/venvs/mempalace/bin/python).",
+        "default": "python3"
       },
       "cache": {
         "type": "object",

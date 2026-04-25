@@ -5,15 +5,19 @@ import { MemoryCache } from "../src/cache.js";
 import type { SearchResult } from "../src/types.js";
 import { existsSync } from "node:fs";
 
-const PY = "/home/derek/.local/share/pipx/venvs/mempalace/bin/python";
-const hasMempalace = existsSync(PY);
+// Integration test — requires a working `mempalace` install. Set
+// REMEMPALACE_TEST_PY to the python binary that has the package installed
+// (e.g. `python3` or `~/.local/share/pipx/venvs/mempalace/bin/python`).
+// The suite is skipped when the env var is unset or the path doesn't exist.
+const PY = process.env.REMEMPALACE_TEST_PY;
+const hasMempalace = Boolean(PY && existsSync(PY));
 const maybe = hasMempalace ? describe : describe.skip;
 
 maybe("integration: real MemPalace MCP", () => {
   let mcp: McpClient;
 
   beforeAll(async () => {
-    mcp = new McpClient({ pythonBin: PY });
+    mcp = new McpClient({ pythonBin: PY as string });
     await mcp.start();
   }, 30000);
 

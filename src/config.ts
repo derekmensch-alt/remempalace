@@ -10,14 +10,22 @@ function expandTilde(path: string): string {
 }
 
 export const DEFAULT_CONFIG: RemempalaceConfig = {
-  mcpPythonBin: "/home/derek/.local/share/pipx/venvs/mempalace/bin/python",
+  // Default assumes `python3` is on PATH and has the `mempalace` package
+  // installed (e.g. `pip install mempalace`). Users installing via pipx
+  // should point this at their venv python, e.g.
+  // `~/.local/share/pipx/venvs/mempalace/bin/python`.
+  mcpPythonBin: "python3",
   cache: { capacity: 200, ttlMs: 300000, kgTtlMs: 600000 },
   injection: {
     maxTokens: 800,
     budgetPercent: 0.15,
     similarityThreshold: 0.25,
     useAaak: true,
-    knownEntities: ["Derek", "OpenClaw", "MemPalace", "remempalace", "Anthropic", "Claude"],
+    // Framework-level entities that should always be considered for KG lookup
+    // even if not extracted by the NER heuristic. Add the user's own canonical
+    // entities (name, project names, etc.) via injection.knownEntities in
+    // openclaw.json.
+    knownEntities: ["OpenClaw", "MemPalace", "remempalace", "Anthropic", "Claude"],
     identityMaxTokens: 150,
     rawIdentity: false,
   },

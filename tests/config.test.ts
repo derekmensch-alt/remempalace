@@ -61,9 +61,9 @@ describe("mergeConfig with identity section", () => {
 
   it("does not expand ~ in absolute paths", () => {
     const cfg = mergeConfig({
-      identity: { soulPath: "/home/derek/SOUL.md" },
+      identity: { soulPath: "/custom/path/SOUL.md" },
     });
-    expect(cfg.identity.soulPath).toBe("/home/derek/SOUL.md");
+    expect(cfg.identity.soulPath).toBe("/custom/path/SOUL.md");
   });
 
   it("preserves all custom identity values together", () => {
