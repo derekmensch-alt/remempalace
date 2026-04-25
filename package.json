@@ -27,9 +27,5 @@
     "typescript": "^5.6.0",
     "vitest": "^2.0.0"
   },
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/derekmensch-alt/remempalace.git"
-  }
+  "license": "MIT"
 }
