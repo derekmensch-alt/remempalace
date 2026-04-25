@@ -16,7 +16,7 @@ remempalace sits in OpenClaw's memory slot and handles three jobs:
 
 ## Why it exists
 
-The current plugin (`mempalace-auto-recall`) shells out to a CLI on every turn. That's slow (~200–500ms each call), there's no caching, and it can't write anything back. remempalace replaces it with:
+An alternative to memory-core.
 
 - A **persistent connection** to MemPalace (no per-turn process spawning)
 - An **in-memory LRU cache** so repeat queries are instant (<5ms)
