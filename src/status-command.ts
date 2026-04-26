@@ -1,4 +1,11 @@
 import type { CacheStats } from "./cache.js";
+import type { DiaryHealthState, ReplayResult } from "./diary-replay.js";
+
+export interface DiaryStatus {
+  state: DiaryHealthState;
+  pending: number;
+  lastReplay?: ReplayResult | null;
+}
 
 export interface StatusReportInput {
   mcpReady: boolean;
@@ -8,6 +15,7 @@ export interface StatusReportInput {
   searchCache: CacheStats;
   kgCache: CacheStats;
   metrics?: Record<string, number>;
+  diary?: DiaryStatus;
 }
 
 function formatCacheLine(label: string, s: CacheStats): string {
@@ -33,6 +41,20 @@ export function buildStatusReport(input: StatusReportInput): string {
   lines.push("Caches:");
   lines.push(`  ${formatCacheLine("search cache", input.searchCache)}`);
   lines.push(`  ${formatCacheLine("kg cache", input.kgCache)}`);
+
+  if (input.diary) {
+    lines.push("");
+    lines.push("Diary:");
+    lines.push(`  state: ${input.diary.state}`);
+    lines.push(`  pending: ${input.diary.pending}`);
+    const lr = input.diary.lastReplay;
+    if (lr) {
+      const when = new Date(lr.at).toISOString();
+      lines.push(
+        `  last replay: ${lr.attempted} attempted, ${lr.succeeded} succeeded, ${lr.failed} failed (${when})`,
+      );
+    }
+  }
 
   if (input.metrics) {
     lines.push("");

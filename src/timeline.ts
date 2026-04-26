@@ -37,7 +37,7 @@ export async function queryTimeline(
     safe(
       mcp.callTool<Array<{ date: string; content: string }>>(
         "mempalace_diary_read",
-        { days_back: opts.daysBack },
+        { agent_name: "remempalace", last_n: 50 },
       ),
       [],
     ),

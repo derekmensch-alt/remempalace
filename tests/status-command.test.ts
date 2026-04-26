@@ -92,4 +92,70 @@ describe("buildStatusReport", () => {
     });
     expect(text).not.toMatch(/Metrics/);
   });
+
+  it("renders Diary section with mcp-healthy state when no pending entries", () => {
+    const text = buildStatusReport({
+      mcpReady: true,
+      hasDiaryWrite: true,
+      hasDiaryRead: true,
+      hasKgInvalidate: true,
+      searchCache: { hits: 0, misses: 0, size: 0 },
+      kgCache: { hits: 0, misses: 0, size: 0 },
+      diary: { state: "mcp-healthy", pending: 0 },
+    });
+    expect(text).toMatch(/Diary/);
+    expect(text).toMatch(/state.*mcp-healthy/i);
+    expect(text).toMatch(/pending.*0/i);
+  });
+
+  it("renders Diary section with split-brain warning when pending > 0", () => {
+    const text = buildStatusReport({
+      mcpReady: true,
+      hasDiaryWrite: true,
+      hasDiaryRead: true,
+      hasKgInvalidate: true,
+      searchCache: { hits: 0, misses: 0, size: 0 },
+      kgCache: { hits: 0, misses: 0, size: 0 },
+      diary: { state: "split-brain", pending: 75 },
+    });
+    expect(text).toMatch(/state.*split-brain/i);
+    expect(text).toMatch(/pending.*75/i);
+  });
+
+  it("renders Diary section with last replay result when present", () => {
+    const text = buildStatusReport({
+      mcpReady: true,
+      hasDiaryWrite: true,
+      hasDiaryRead: true,
+      hasKgInvalidate: true,
+      searchCache: { hits: 0, misses: 0, size: 0 },
+      kgCache: { hits: 0, misses: 0, size: 0 },
+      diary: {
+        state: "degraded",
+        pending: 5,
+        lastReplay: {
+          attempted: 10,
+          succeeded: 5,
+          failed: 5,
+          at: new Date("2026-04-26T00:00:00Z").getTime(),
+        },
+      },
+    });
+    expect(text).toMatch(/last replay/i);
+    expect(text).toMatch(/10.*attempted/i);
+    expect(text).toMatch(/5.*succeeded/i);
+    expect(text).toMatch(/5.*failed/i);
+  });
+
+  it("omits Diary section when diary is undefined", () => {
+    const text = buildStatusReport({
+      mcpReady: true,
+      hasDiaryWrite: true,
+      hasDiaryRead: true,
+      hasKgInvalidate: true,
+      searchCache: { hits: 0, misses: 0, size: 0 },
+      kgCache: { hits: 0, misses: 0, size: 0 },
+    });
+    expect(text).not.toMatch(/^Diary:/m);
+  });
 });

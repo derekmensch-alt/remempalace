@@ -31,6 +31,7 @@ import { isTimelineQuery, queryTimeline } from "./timeline.js";
 import { MempalaceMemoryRuntime } from "./memory-runtime.js";
 import { buildStatusReport } from "./status-command.js";
 import { Metrics } from "./metrics.js";
+import { DiaryReconciler, computeDiaryHealth } from "./diary-replay.js";
 
 interface SessionMessage {
   role?: string;
@@ -163,11 +164,31 @@ const plugin = {
       allowedReadRoots: cfg.memoryRuntime.allowedReadRoots,
     });
 
+    const diaryReconciler = new DiaryReconciler({
+      diaryDir: cfg.diary.localDir,
+      mcp,
+      metrics,
+    });
+
     const initPromise = mcp
       .start()
-      .then(() => {
+      .then(async () => {
         logger.info("MCP client started");
-        mcp.probeCapabilities().catch(() => {});
+        await mcp.probeCapabilities().catch(() => {});
+        if (cfg.diary.replayOnStart && mcp.hasDiaryWrite) {
+          diaryReconciler
+            .replay()
+            .then((r) => {
+              if (r.attempted > 0) {
+                logger.info(
+                  `diary replay: ${r.succeeded}/${r.attempted} succeeded, ${r.failed} failed`,
+                );
+              }
+            })
+            .catch((err: Error) => {
+              logger.warn(`diary replay failed: ${err.message}`);
+            });
+        }
       })
       .catch((err: Error) => {
         logger.error(`MCP start failed: ${err.message}`);
@@ -442,17 +463,30 @@ const plugin = {
         name: "remempalace",
         description: "Show remempalace memory plugin status (MCP, caches, diary fallback)",
         acceptsArgs: false,
-        handler: () => ({
-          text: buildStatusReport({
-            mcpReady: mcp.isReady(),
-            hasDiaryWrite: mcp.hasDiaryWrite,
-            hasDiaryRead: mcp.hasDiaryRead,
-            hasKgInvalidate: mcp.hasKgInvalidate,
-            searchCache: searchCache.stats(),
-            kgCache: kgCache.stats(),
-            metrics: metrics.snapshot(),
-          }),
-        }),
+        handler: async () => {
+          const pending = await diaryReconciler.loadPending().catch(() => []);
+          const diaryStatus = {
+            state: computeDiaryHealth({
+              hasDiaryWrite: mcp.hasDiaryWrite,
+              pending: pending.length,
+              lastReplay: diaryReconciler.lastReplayResult,
+            }),
+            pending: pending.length,
+            lastReplay: diaryReconciler.lastReplayResult,
+          };
+          return {
+            text: buildStatusReport({
+              mcpReady: mcp.isReady(),
+              hasDiaryWrite: mcp.hasDiaryWrite,
+              hasDiaryRead: mcp.hasDiaryRead,
+              hasKgInvalidate: mcp.hasKgInvalidate,
+              searchCache: searchCache.stats(),
+              kgCache: kgCache.stats(),
+              metrics: metrics.snapshot(),
+              diary: diaryStatus,
+            }),
+          };
+        },
       });
     }
   },

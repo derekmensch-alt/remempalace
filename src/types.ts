@@ -51,6 +51,8 @@ export interface RemempalaceConfig {
   diary: {
     enabled: boolean;
     maxEntryTokens: number;
+    localDir: string;
+    replayOnStart: boolean;
   };
   kg: {
     autoLearn: boolean;

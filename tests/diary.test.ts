@@ -80,6 +80,19 @@ describe("writeDiaryAsync", () => {
     expect(snap["diary.write.mcp_failed"]).toBe(1);
   });
 
+  it("falls back to JSONL when mcp write rejects (transient failure recovery)", async () => {
+    const metrics = new Metrics();
+    const mockMcp = {
+      hasDiaryWrite: true,
+      callTool: vi.fn().mockRejectedValue(new Error("boom")),
+    };
+    writeDiaryAsync(mockMcp as any, "summary", metrics);
+    await new Promise((r) => setTimeout(r, 20));
+    const snap = metrics.snapshot();
+    expect(snap["diary.write.mcp_failed"]).toBe(1);
+    expect(snap["diary.write.fallback"]).toBe(1);
+  });
+
   it("records diary.write.fallback when hasDiaryWrite is false", async () => {
     const metrics = new Metrics();
     const mockMcp = {

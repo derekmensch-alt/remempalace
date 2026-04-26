@@ -50,23 +50,29 @@ export function writeDiaryAsync(
   metrics?: Metrics,
 ): void {
   metrics?.inc("diary.write.attempted");
-  if (mcp.hasDiaryWrite) {
-    void mcp
-      .callTool("mempalace_diary_write", {
-        wing: "remempalace",
-        room: "session",
-        content: summary,
-        added_by: "remempalace",
-      })
-      .then(() => metrics?.inc("diary.write.mcp_succeeded"))
-      .catch(() => metrics?.inc("diary.write.mcp_failed"));
-  } else {
+  const writeJsonl = () => {
     metrics?.inc("diary.write.fallback");
-    void appendLocalDiary({
+    return appendLocalDiary({
       wing: "remempalace",
       room: "session",
       content: summary,
       ts: new Date().toISOString(),
     }).catch(() => {});
+  };
+
+  if (mcp.hasDiaryWrite) {
+    void mcp
+      .callTool("mempalace_diary_write", {
+        agent_name: "remempalace",
+        entry: summary,
+        topic: "session",
+      })
+      .then(() => metrics?.inc("diary.write.mcp_succeeded"))
+      .catch(() => {
+        metrics?.inc("diary.write.mcp_failed");
+        return writeJsonl();
+      });
+  } else {
+    void writeJsonl();
   }
 }

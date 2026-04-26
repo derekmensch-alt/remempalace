@@ -30,7 +30,12 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
     rawIdentity: false,
   },
   tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
-  diary: { enabled: true, maxEntryTokens: 500 },
+  diary: {
+    enabled: true,
+    maxEntryTokens: 500,
+    localDir: `${homedir()}/.mempalace/palace/diary`,
+    replayOnStart: true,
+  },
   kg: { autoLearn: true, batchSize: 5, flushIntervalMs: 30000, invalidateOnConflict: false },
   prefetch: { diaryCount: 3, identityEntities: true },
   identity: {
@@ -67,7 +72,11 @@ export function mergeConfig(
     cache: { ...DEFAULT_CONFIG.cache, ...user.cache },
     injection: { ...DEFAULT_CONFIG.injection, ...user.injection },
     tiers: { ...DEFAULT_CONFIG.tiers, ...user.tiers },
-    diary: { ...DEFAULT_CONFIG.diary, ...user.diary },
+    diary: {
+      ...DEFAULT_CONFIG.diary,
+      ...user.diary,
+      localDir: expandTilde(user.diary?.localDir ?? DEFAULT_CONFIG.diary.localDir),
+    },
     kg: { ...DEFAULT_CONFIG.kg, ...user.kg },
     prefetch: { ...DEFAULT_CONFIG.prefetch, ...user.prefetch },
     identity,

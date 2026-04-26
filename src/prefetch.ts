@@ -24,7 +24,10 @@ export async function prefetchWakeUp(
   const [statusResult, diaryResult, _warmupResult] = await Promise.all([
     safe(mcp.callTool<PalaceStatus>("mempalace_status", {}), null),
     safe(
-      mcp.callTool<unknown[]>("mempalace_diary_read", { limit: opts.diaryCount }),
+      mcp.callTool<unknown[]>("mempalace_diary_read", {
+        agent_name: "remempalace",
+        last_n: opts.diaryCount,
+      }),
       [],
     ),
     safe(mcp.callTool("mempalace_search", { query: "__warmup__", limit: 1 }), null),

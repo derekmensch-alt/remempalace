@@ -46,10 +46,9 @@ describe("writeDiaryAsync fallback routing", () => {
 
     expect(mockMcp.callTool).toHaveBeenCalledOnce();
     expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_diary_write", {
-      wing: "remempalace",
-      room: "session",
-      content: "remote summary",
-      added_by: "remempalace",
+      agent_name: "remempalace",
+      entry: "remote summary",
+      topic: "session",
     });
     expect(appendLocalDiary).not.toHaveBeenCalled();
   });
