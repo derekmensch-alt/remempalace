@@ -22,7 +22,8 @@ import { buildTieredInjection } from "./tiers.js";
 import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
 import { summarizeSession, writeDiaryAsync } from "./diary.js";
-import { KgBatcher, extractFacts } from "./kg.js";
+import { KgBatcher } from "./kg.js";
+import { extractStructuredFacts } from "./structured-extractor.js";
 import { prefetchWakeUp } from "./prefetch.js";
 import { HeartbeatWarmer } from "./heartbeat.js";
 import { loadIdentityContext } from "./identity.js";
@@ -272,10 +273,29 @@ const plugin = {
         api.on("llm_output", (event: unknown) => {
           const ev = event as { assistantTexts?: string[] };
           if (!ev.assistantTexts) return;
+          const minConfidence = cfg.kg.minConfidence;
           for (const text of ev.assistantTexts) {
-            const facts = extractFacts(text);
-            metrics.inc("kg.facts.extracted", facts.length);
-            for (const fact of facts) kgBatcher.add(fact);
+            const all = extractStructuredFacts(text);
+            const kept: typeof all = [];
+            let dropped = 0;
+            for (const f of all) {
+              metrics.inc(`kg.facts.extracted.${f.category}`);
+              if (f.confidence < minConfidence) {
+                dropped += 1;
+                continue;
+              }
+              kept.push(f);
+            }
+            if (dropped > 0) metrics.inc("kg.facts.dropped_low_confidence", dropped);
+            metrics.inc("kg.facts.extracted", kept.length);
+            for (const f of kept) {
+              kgBatcher.add({
+                subject: f.subject,
+                predicate: f.predicate,
+                object: f.object,
+                valid_from: f.valid_from,
+              });
+            }
           }
         });
       }

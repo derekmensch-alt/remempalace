@@ -91,6 +91,36 @@ describe("KgBatcher invalidation", () => {
     await batcher.stop();
   });
 
+  it("list-cardinality predicate (uses): never invalidates even with different object", async () => {
+    const mcp = makeMcp({
+      callTool: vi.fn().mockImplementation(async (tool: string) => {
+        if (tool === "mempalace_kg_query") {
+          return {
+            facts: [
+              { subject: "Derek", predicate: "uses", object: "OpenClaw", current: true },
+            ],
+          };
+        }
+        return {};
+      }) as unknown as McpClient["callTool"],
+    });
+
+    const batcher = new KgBatcher(mcp, {
+      batchSize: 10,
+      flushIntervalMs: 60000,
+      invalidateOnConflict: true,
+      getMcpCaps: () => ({ hasKgInvalidate: true }),
+    });
+    batcher.add({ subject: "Derek", predicate: "uses", object: "Vitest" });
+    await batcher.flush();
+
+    const calls = (mcp.callTool as ReturnType<typeof vi.fn>).mock.calls as [string, unknown][];
+    const names = calls.map(([t]) => t);
+    expect(names).not.toContain("mempalace_kg_invalidate");
+    expect(names).not.toContain("mempalace_kg_query");
+    await batcher.stop();
+  });
+
   it("same object: does NOT call kg_invalidate", async () => {
     const mcp = makeMcp({
       callTool: vi.fn().mockImplementation(async (tool: string) => {

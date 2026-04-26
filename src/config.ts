@@ -36,7 +36,13 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
     localDir: `${homedir()}/.mempalace/palace/diary`,
     replayOnStart: true,
   },
-  kg: { autoLearn: true, batchSize: 5, flushIntervalMs: 30000, invalidateOnConflict: false },
+  kg: {
+    autoLearn: true,
+    batchSize: 5,
+    flushIntervalMs: 30000,
+    invalidateOnConflict: false,
+    minConfidence: 0.6,
+  },
   prefetch: { diaryCount: 3, identityEntities: true },
   identity: {
     soulPath: `${homedir()}/SOUL.md`,

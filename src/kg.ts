@@ -2,6 +2,7 @@ import type { McpClient } from "./mcp-client.js";
 import { dedupeWithKey } from "./dedup.js";
 import type { KgFact } from "./types.js";
 import type { Metrics } from "./metrics.js";
+import { classifyPredicate } from "./contradiction.js";
 
 function normalizeKgFacts(raw: unknown): KgFact[] {
   if (!raw || typeof raw !== "object") return [];
@@ -85,23 +86,28 @@ export class KgBatcher {
       this.opts.getMcpCaps?.().hasKgInvalidate === true;
 
     for (const f of batch) {
-      if (shouldInvalidate) {
+      if (shouldInvalidate && classifyPredicate(f.predicate) === "single") {
         try {
           const raw = await this.mcp.callTool<unknown>("mempalace_kg_query", { entity: f.subject });
           const existing = normalizeKgFacts(raw);
+          const conflicts = existing.filter(
+            (e) => e.predicate === f.predicate && e.object !== f.object && e.current !== false,
+          );
+          if (conflicts.length > 0) {
+            this.opts.metrics?.inc("kg.contradictions.detected.single", conflicts.length);
+          }
           await Promise.all(
-            existing
-              .filter((e) => e.predicate === f.predicate && e.object !== f.object)
-              .map((e) => {
-                this.opts.metrics?.inc("kg.invalidate.calls");
-                return this.mcp
-                  .callTool("mempalace_kg_invalidate", {
-                    subject: e.subject,
-                    predicate: e.predicate,
-                    object: e.object,
-                  })
-                  .catch(() => {});
-              }),
+            conflicts.map((e) => {
+              this.opts.metrics?.inc("kg.invalidate.calls");
+              this.opts.metrics?.inc("kg.contradictions.invalidated");
+              return this.mcp
+                .callTool("mempalace_kg_invalidate", {
+                  subject: e.subject,
+                  predicate: e.predicate,
+                  object: e.object,
+                })
+                .catch(() => {});
+            }),
           );
         } catch {
           // best effort

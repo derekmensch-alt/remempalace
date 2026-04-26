@@ -15,6 +15,23 @@ export interface KgFact {
   current?: boolean;
 }
 
+export type FactCategory =
+  | "preference"
+  | "identity"
+  | "project_state"
+  | "decision"
+  | "environment";
+
+export interface ExtractedFact {
+  subject: string;
+  predicate: string;
+  object: string;
+  category: FactCategory;
+  confidence: number;
+  source_span?: string;
+  valid_from?: string;
+}
+
 export interface DiaryEntry {
   date: string;
   content: string;
@@ -59,6 +76,7 @@ export interface RemempalaceConfig {
     batchSize: number;
     flushIntervalMs: number;
     invalidateOnConflict: boolean;
+    minConfidence: number;
   };
   prefetch: {
     diaryCount: number;
