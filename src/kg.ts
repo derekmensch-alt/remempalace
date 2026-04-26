@@ -1,6 +1,7 @@
 import type { McpClient } from "./mcp-client.js";
 import { dedupeWithKey } from "./dedup.js";
 import type { KgFact } from "./types.js";
+import type { Metrics } from "./metrics.js";
 
 function normalizeKgFacts(raw: unknown): KgFact[] {
   if (!raw || typeof raw !== "object") return [];
@@ -49,6 +50,7 @@ export interface KgBatcherOptions {
   flushIntervalMs: number;
   invalidateOnConflict?: boolean;
   getMcpCaps?: () => { hasKgInvalidate: boolean };
+  metrics?: Metrics;
 }
 
 export class KgBatcher {
@@ -66,6 +68,7 @@ export class KgBatcher {
   add(fact: KgFact): void {
     if (this.stopped) return;
     this.buffer.push(fact);
+    this.opts.metrics?.inc("kg.facts.batched");
     if (this.buffer.length >= this.opts.batchSize) {
       void this.flush();
     }
@@ -89,15 +92,16 @@ export class KgBatcher {
           await Promise.all(
             existing
               .filter((e) => e.predicate === f.predicate && e.object !== f.object)
-              .map((e) =>
-                this.mcp
+              .map((e) => {
+                this.opts.metrics?.inc("kg.invalidate.calls");
+                return this.mcp
                   .callTool("mempalace_kg_invalidate", {
                     subject: e.subject,
                     predicate: e.predicate,
                     object: e.object,
                   })
-                  .catch(() => {}),
-              ),
+                  .catch(() => {});
+              }),
           );
         } catch {
           // best effort
@@ -110,7 +114,8 @@ export class KgBatcher {
           object: f.object,
           valid_from: f.valid_from,
         })
-        .catch(() => {});
+        .then(() => this.opts.metrics?.inc("kg.facts.flushed"))
+        .catch(() => this.opts.metrics?.inc("kg.facts.flush_failed"));
     }
   }
 

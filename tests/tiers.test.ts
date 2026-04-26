@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildTieredInjection } from "../src/tiers.js";
+import { Metrics } from "../src/metrics.js";
 import type { SearchResult, KgFact, InjectionBudget } from "../src/types.js";
 
 describe("buildTieredInjection", () => {
@@ -175,5 +176,40 @@ describe("buildTieredInjection", () => {
     });
     const joined = out.join("\n");
     expect(joined.toLowerCase()).toContain("authoritative");
+  });
+
+  it("records per-tier injection token totals into metrics", () => {
+    const metrics = new Metrics();
+    const budget: InjectionBudget = {
+      maxTokens: 500,
+      allowedTiers: ["L0", "L1", "L2"],
+      contextFillRatio: 0.7,
+    };
+    buildTieredInjection({
+      kgFacts: sampleFacts,
+      searchResults: sampleResults,
+      budget,
+      tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+      useAaak: true,
+      metrics,
+    });
+    const snap = metrics.snapshot();
+    // L0 line plus L1 hits should produce non-zero tokens for L0 and L1.
+    expect(snap["injection.tokens.l0"]).toBeGreaterThan(0);
+    expect(snap["injection.tokens.l1"]).toBeGreaterThan(0);
+  });
+
+  it("does not record tokens when no tiers allowed", () => {
+    const metrics = new Metrics();
+    const budget: InjectionBudget = { maxTokens: 0, allowedTiers: [], contextFillRatio: 0.9 };
+    buildTieredInjection({
+      kgFacts: sampleFacts,
+      searchResults: sampleResults,
+      budget,
+      tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+      useAaak: true,
+      metrics,
+    });
+    expect(metrics.snapshot()).toEqual({});
   });
 });

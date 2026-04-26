@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { extractFacts, KgBatcher } from "../src/kg.js";
+import { Metrics } from "../src/metrics.js";
 
 describe("extractFacts", () => {
   it("extracts SUBJ is PRED OBJ patterns", () => {
@@ -65,5 +66,35 @@ describe("KgBatcher", () => {
     await new Promise((r) => setTimeout(r, 5));
     expect(mockMcp.callTool).toHaveBeenCalledTimes(1);
     await batcher.stop();
+  });
+
+  it("records kg.facts.batched on add and kg.facts.flushed on flush", async () => {
+    const metrics = new Metrics();
+    const mockMcp = { callTool: vi.fn().mockResolvedValue({}) };
+    const batcher = new KgBatcher(mockMcp as any, {
+      batchSize: 2,
+      flushIntervalMs: 10000,
+      metrics,
+    });
+    batcher.add({ subject: "A", predicate: "p", object: "1" });
+    batcher.add({ subject: "B", predicate: "p", object: "2" });
+    await new Promise((r) => setTimeout(r, 5));
+    const snap = metrics.snapshot();
+    expect(snap["kg.facts.batched"]).toBe(2);
+    expect(snap["kg.facts.flushed"]).toBe(2);
+    await batcher.stop();
+  });
+
+  it("does not increment kg.facts.batched when stopped", async () => {
+    const metrics = new Metrics();
+    const mockMcp = { callTool: vi.fn().mockResolvedValue({}) };
+    const batcher = new KgBatcher(mockMcp as any, {
+      batchSize: 5,
+      flushIntervalMs: 10000,
+      metrics,
+    });
+    await batcher.stop();
+    batcher.add({ subject: "A", predicate: "p", object: "1" });
+    expect(metrics.snapshot()["kg.facts.batched"]).toBeUndefined();
   });
 });

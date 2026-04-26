@@ -1,5 +1,6 @@
 import { countTokens } from "./token-counter.js";
 import { appendLocalDiary } from "./diary-local.js";
+import type { Metrics } from "./metrics.js";
 
 interface SessionMessage {
   role?: string;
@@ -46,15 +47,21 @@ export function summarizeSession(
 export function writeDiaryAsync(
   mcp: { hasDiaryWrite: boolean; callTool: (name: string, args: Record<string, unknown>) => Promise<unknown> },
   summary: string,
+  metrics?: Metrics,
 ): void {
+  metrics?.inc("diary.write.attempted");
   if (mcp.hasDiaryWrite) {
-    void mcp.callTool("mempalace_diary_write", {
-      wing: "remempalace",
-      room: "session",
-      content: summary,
-      added_by: "remempalace",
-    }).catch(() => {});
+    void mcp
+      .callTool("mempalace_diary_write", {
+        wing: "remempalace",
+        room: "session",
+        content: summary,
+        added_by: "remempalace",
+      })
+      .then(() => metrics?.inc("diary.write.mcp_succeeded"))
+      .catch(() => metrics?.inc("diary.write.mcp_failed"));
   } else {
+    metrics?.inc("diary.write.fallback");
     void appendLocalDiary({
       wing: "remempalace",
       room: "session",

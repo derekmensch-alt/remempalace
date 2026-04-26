@@ -7,6 +7,7 @@ export interface StatusReportInput {
   hasKgInvalidate: boolean;
   searchCache: CacheStats;
   kgCache: CacheStats;
+  metrics?: Record<string, number>;
 }
 
 function formatCacheLine(label: string, s: CacheStats): string {
@@ -32,6 +33,19 @@ export function buildStatusReport(input: StatusReportInput): string {
   lines.push("Caches:");
   lines.push(`  ${formatCacheLine("search cache", input.searchCache)}`);
   lines.push(`  ${formatCacheLine("kg cache", input.kgCache)}`);
+
+  if (input.metrics) {
+    lines.push("");
+    lines.push("Metrics:");
+    const keys = Object.keys(input.metrics).sort();
+    if (keys.length === 0) {
+      lines.push("  (no counters yet)");
+    } else {
+      for (const k of keys) {
+        lines.push(`  ${k}: ${input.metrics[k]}`);
+      }
+    }
+  }
 
   return lines.join("\n");
 }

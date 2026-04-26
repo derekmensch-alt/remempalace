@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { summarizeSession, writeDiaryAsync } from "../src/diary.js";
+import { Metrics } from "../src/metrics.js";
 import type { AgentMessage } from "../src/types-messages.js";
 
 describe("summarizeSession", () => {
@@ -49,5 +50,47 @@ describe("writeDiaryAsync", () => {
     };
     expect(() => writeDiaryAsync(mockMcp as any, "summary")).not.toThrow();
     await new Promise((r) => setTimeout(r, 10));
+  });
+
+  it("records diary.write.attempted + mcp_succeeded when mcp write resolves", async () => {
+    const metrics = new Metrics();
+    const mockMcp = {
+      hasDiaryWrite: true,
+      callTool: vi.fn().mockResolvedValue({}),
+    };
+    writeDiaryAsync(mockMcp as any, "summary", metrics);
+    await new Promise((r) => setTimeout(r, 10));
+    const snap = metrics.snapshot();
+    expect(snap["diary.write.attempted"]).toBe(1);
+    expect(snap["diary.write.mcp_succeeded"]).toBe(1);
+    expect(snap["diary.write.mcp_failed"]).toBeUndefined();
+    expect(snap["diary.write.fallback"]).toBeUndefined();
+  });
+
+  it("records diary.write.mcp_failed when mcp write rejects", async () => {
+    const metrics = new Metrics();
+    const mockMcp = {
+      hasDiaryWrite: true,
+      callTool: vi.fn().mockRejectedValue(new Error("boom")),
+    };
+    writeDiaryAsync(mockMcp as any, "summary", metrics);
+    await new Promise((r) => setTimeout(r, 10));
+    const snap = metrics.snapshot();
+    expect(snap["diary.write.attempted"]).toBe(1);
+    expect(snap["diary.write.mcp_failed"]).toBe(1);
+  });
+
+  it("records diary.write.fallback when hasDiaryWrite is false", async () => {
+    const metrics = new Metrics();
+    const mockMcp = {
+      hasDiaryWrite: false,
+      callTool: vi.fn(),
+    };
+    writeDiaryAsync(mockMcp as any, "summary", metrics);
+    await new Promise((r) => setTimeout(r, 10));
+    const snap = metrics.snapshot();
+    expect(snap["diary.write.attempted"]).toBe(1);
+    expect(snap["diary.write.fallback"]).toBe(1);
+    expect(mockMcp.callTool).not.toHaveBeenCalled();
   });
 });

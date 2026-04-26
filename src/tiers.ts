@@ -2,6 +2,7 @@ import type { InjectionBudget, KgFact, SearchResult } from "./types.js";
 import { formatKgFact, formatSearchResult } from "./aaak.js";
 import { countTokens } from "./token-counter.js";
 import { dedupeByContent } from "./dedup.js";
+import type { Metrics } from "./metrics.js";
 
 export interface TieredInjectionParams {
   kgFacts: KgFact[];
@@ -9,6 +10,7 @@ export interface TieredInjectionParams {
   budget: InjectionBudget;
   tiers: { l1Threshold: number; l2Threshold: number; l2BudgetFloor: number };
   useAaak: boolean;
+  metrics?: Metrics;
 }
 
 function rankKgFacts(facts: KgFact[]): KgFact[] {
@@ -26,7 +28,7 @@ function rankKgFacts(facts: KgFact[]): KgFact[] {
 }
 
 export function buildTieredInjection(params: TieredInjectionParams): string[] {
-  const { kgFacts, searchResults, budget, tiers } = params;
+  const { kgFacts, searchResults, budget, tiers, metrics } = params;
   if (budget.allowedTiers.length === 0 || budget.maxTokens === 0) return [];
 
   const lines: string[] = [];
@@ -35,9 +37,11 @@ export function buildTieredInjection(params: TieredInjectionParams): string[] {
     const nextTokens = countTokens(next);
     return tokensUsed + nextTokens <= budget.maxTokens;
   };
-  const add = (line: string) => {
+  const add = (line: string, tier: "l0" | "l1" | "l2") => {
     lines.push(line);
-    tokensUsed += countTokens(line);
+    const t = countTokens(line);
+    tokensUsed += t;
+    metrics?.inc(`injection.tokens.${tier}`, t);
   };
 
   // L0: KG facts — filter to current, sort newest-first, greedy pack per-fact so a tight
@@ -50,10 +54,10 @@ export function buildTieredInjection(params: TieredInjectionParams): string[] {
       const header = "KG FACTS (authoritative, newest first):";
       const firstLine = `- ${formatKgFact(ranked[0])}`;
       if (countTokens(header) + countTokens(firstLine) <= budget.maxTokens) {
-        add(header);
+        add(header, "l0");
         for (const fact of ranked) {
           const line = `- ${formatKgFact(fact)}`;
-          if (canAdd(line)) add(line);
+          if (canAdd(line)) add(line, "l0");
           else break;
         }
       }
@@ -67,7 +71,7 @@ export function buildTieredInjection(params: TieredInjectionParams): string[] {
       .slice(0, 2);
     for (const hit of l1Hits) {
       const line = formatSearchResult(hit);
-      if (canAdd(line)) add(line);
+      if (canAdd(line)) add(line, "l1");
       else break;
     }
   }
@@ -79,7 +83,7 @@ export function buildTieredInjection(params: TieredInjectionParams): string[] {
     );
     for (const hit of l2Hits) {
       const line = formatSearchResult(hit);
-      if (canAdd(line)) add(line);
+      if (canAdd(line)) add(line, "l2");
       else break;
     }
   }

@@ -44,4 +44,52 @@ describe("buildStatusReport", () => {
     });
     expect(text).toMatch(/MCP.*(down|not ready|unavailable)/i);
   });
+
+  it("renders a Metrics section when metrics provided", () => {
+    const text = buildStatusReport({
+      mcpReady: true,
+      hasDiaryWrite: true,
+      hasDiaryRead: true,
+      hasKgInvalidate: true,
+      searchCache: { hits: 0, misses: 0, size: 0 },
+      kgCache: { hits: 0, misses: 0, size: 0 },
+      metrics: {
+        "recall.search.calls": 12,
+        "recall.search.cache_hits": 7,
+        "diary.write.attempted": 3,
+        "diary.write.fallback": 1,
+        "injection.tokens.l0": 480,
+      },
+    });
+    expect(text).toMatch(/Metrics/);
+    expect(text).toMatch(/recall\.search\.calls.*12/);
+    expect(text).toMatch(/diary\.write\.fallback.*1/);
+    expect(text).toMatch(/injection\.tokens\.l0.*480/);
+  });
+
+  it("renders 'no counters yet' when metrics is empty", () => {
+    const text = buildStatusReport({
+      mcpReady: true,
+      hasDiaryWrite: true,
+      hasDiaryRead: true,
+      hasKgInvalidate: true,
+      searchCache: { hits: 0, misses: 0, size: 0 },
+      kgCache: { hits: 0, misses: 0, size: 0 },
+      metrics: {},
+    });
+    expect(text).toMatch(/Metrics/);
+    expect(text).toMatch(/no counters yet/i);
+  });
+
+  it("omits Metrics section when metrics is undefined", () => {
+    const text = buildStatusReport({
+      mcpReady: true,
+      hasDiaryWrite: true,
+      hasDiaryRead: true,
+      hasKgInvalidate: true,
+      searchCache: { hits: 0, misses: 0, size: 0 },
+      kgCache: { hits: 0, misses: 0, size: 0 },
+    });
+    expect(text).not.toMatch(/Metrics/);
+  });
 });

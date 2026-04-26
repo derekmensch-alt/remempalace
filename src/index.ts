@@ -30,6 +30,7 @@ import { compactIdentity } from "./identity-compact.js";
 import { isTimelineQuery, queryTimeline } from "./timeline.js";
 import { MempalaceMemoryRuntime } from "./memory-runtime.js";
 import { buildStatusReport } from "./status-command.js";
+import { Metrics } from "./metrics.js";
 
 interface SessionMessage {
   role?: string;
@@ -137,6 +138,7 @@ const plugin = {
     const logger = createLogger("remempalace");
     logger.info(`config resolved: pythonBin=${cfg.mcpPythonBin}`);
 
+    const metrics = new Metrics();
     const mcp = new McpClient({ pythonBin: cfg.mcpPythonBin });
     const searchCache = new MemoryCache<SearchResult[]>({
       capacity: cfg.cache.capacity,
@@ -152,6 +154,7 @@ const plugin = {
       kgCache,
       similarityThreshold: cfg.injection.similarityThreshold,
       knownEntities: cfg.injection.knownEntities,
+      metrics,
     });
 
     const memoryRuntime = new MempalaceMemoryRuntime({
@@ -189,6 +192,7 @@ const plugin = {
           flushIntervalMs: cfg.kg.flushIntervalMs,
           invalidateOnConflict: cfg.kg.invalidateOnConflict,
           getMcpCaps: () => ({ hasKgInvalidate: mcp.hasKgInvalidate }),
+          metrics,
         })
       : null;
 
@@ -239,7 +243,7 @@ const plugin = {
           sessionMessages.delete(key);
           const summary = summarizeSession(messages, { maxTokens: cfg.diary.maxEntryTokens });
           if (!summary) return;
-          writeDiaryAsync(mcp, summary);
+          writeDiaryAsync(mcp, summary, metrics);
         });
       }
 
@@ -249,6 +253,7 @@ const plugin = {
           if (!ev.assistantTexts) return;
           for (const text of ev.assistantTexts) {
             const facts = extractFacts(text);
+            metrics.inc("kg.facts.extracted", facts.length);
             for (const fact of facts) kgBatcher.add(fact);
           }
         });
@@ -256,6 +261,7 @@ const plugin = {
 
       api.on("before_prompt_build", async (event: unknown, ctx: unknown) => {
         await initPromise;
+        metrics.inc("recall.invoked");
         const ev = event as PromptBuildEvent;
         const hctx = ctx as HookContext & { modelId?: string; contextWindow?: number };
         const sessionKey = hctx?.sessionKey ?? "default";
@@ -275,6 +281,7 @@ const plugin = {
 
         // Timeline branch: bypass tiered recall for temporal queries
         if (isTimelineQuery(prompt)) {
+          metrics.inc("recall.timeline.calls");
           try {
             const tl = await queryTimeline(mcp, { daysBack: 7 });
             const lines = [
@@ -346,6 +353,7 @@ const plugin = {
             budget,
             tiers: cfg.tiers,
             useAaak: cfg.injection.useAaak,
+            metrics,
           });
 
           const lines: string[] = [];
@@ -442,6 +450,7 @@ const plugin = {
             hasKgInvalidate: mcp.hasKgInvalidate,
             searchCache: searchCache.stats(),
             kgCache: kgCache.stats(),
+            metrics: metrics.snapshot(),
           }),
         }),
       });
