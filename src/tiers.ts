@@ -51,12 +51,14 @@ export function buildTieredInjection(params: TieredInjectionParams): string[] {
   if (budget.allowedTiers.includes("L0") && kgFacts.length > 0) {
     const ranked = rankKgFacts(kgFacts);
     if (ranked.length > 0) {
-      const header = "KG FACTS (authoritative, newest first):";
-      const firstLine = `- ${formatKgFact(ranked[0])}`;
+      const header = "KG FACTS (source=remempalace KG, authoritative, newest first):";
+      const firstSource = ranked[0].source_closet ? `source=${ranked[0].source_closet}` : "source=unknown";
+      const firstLine = `- ${formatKgFact(ranked[0])} [${firstSource}]`;
       if (countTokens(header) + countTokens(firstLine) <= budget.maxTokens) {
         add(header, "l0");
         for (const fact of ranked) {
-          const line = `- ${formatKgFact(fact)}`;
+          const source = fact.source_closet ? `source=${fact.source_closet}` : "source=unknown";
+          const line = `- ${formatKgFact(fact)} [${source}]`;
           if (canAdd(line)) add(line, "l0");
           else break;
         }
@@ -70,7 +72,7 @@ export function buildTieredInjection(params: TieredInjectionParams): string[] {
       .filter((r) => r.similarity >= tiers.l1Threshold)
       .slice(0, 2);
     for (const hit of l1Hits) {
-      const line = formatSearchResult(hit);
+      const line = `${formatSearchResult(hit)} [source=remempalace search, confidence=${hit.similarity.toFixed(2)}]`;
       if (canAdd(line)) add(line, "l1");
       else break;
     }
@@ -82,7 +84,7 @@ export function buildTieredInjection(params: TieredInjectionParams): string[] {
       (r) => r.similarity >= tiers.l2Threshold && r.similarity < tiers.l1Threshold,
     );
     for (const hit of l2Hits) {
-      const line = formatSearchResult(hit);
+      const line = `${formatSearchResult(hit)} [source=remempalace search, confidence=${hit.similarity.toFixed(2)}]`;
       if (canAdd(line)) add(line, "l2");
       else break;
     }

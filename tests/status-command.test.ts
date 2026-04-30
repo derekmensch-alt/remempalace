@@ -158,4 +158,31 @@ describe("buildStatusReport", () => {
     });
     expect(text).not.toMatch(/^Diary:/m);
   });
+
+  it("renders last recall audit details when available", () => {
+    const text = buildStatusReport({
+      mcpReady: true,
+      hasDiaryWrite: true,
+      hasDiaryRead: true,
+      hasKgInvalidate: true,
+      searchCache: { hits: 0, misses: 0, size: 0 },
+      kgCache: { hits: 0, misses: 0, size: 0 },
+      lastRecall: {
+        sessionKey: "chat-1",
+        promptPreview: "what memory plugin are you using?",
+        candidates: ["remempalace"],
+        kgFactCount: 2,
+        searchResultCount: 1,
+        injectedLineCount: 4,
+        identityIncluded: false,
+        at: new Date("2026-04-30T09:26:00Z").getTime(),
+      },
+    });
+
+    expect(text).toMatch(/Last recall/);
+    expect(text).toMatch(/chat-1/);
+    expect(text).toMatch(/remempalace/);
+    expect(text).toMatch(/KG facts.*2/i);
+    expect(text).toMatch(/search results.*1/i);
+  });
 });

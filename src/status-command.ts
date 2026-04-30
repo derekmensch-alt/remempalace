@@ -7,6 +7,17 @@ export interface DiaryStatus {
   lastReplay?: ReplayResult | null;
 }
 
+export interface LastRecallStatus {
+  sessionKey: string;
+  promptPreview: string;
+  candidates: string[];
+  kgFactCount: number;
+  searchResultCount: number;
+  injectedLineCount: number;
+  identityIncluded: boolean;
+  at: number;
+}
+
 export interface StatusReportInput {
   mcpReady: boolean;
   hasDiaryWrite: boolean;
@@ -16,6 +27,7 @@ export interface StatusReportInput {
   kgCache: CacheStats;
   metrics?: Record<string, number>;
   diary?: DiaryStatus;
+  lastRecall?: LastRecallStatus | null;
 }
 
 function formatCacheLine(label: string, s: CacheStats): string {
@@ -54,6 +66,20 @@ export function buildStatusReport(input: StatusReportInput): string {
         `  last replay: ${lr.attempted} attempted, ${lr.succeeded} succeeded, ${lr.failed} failed (${when})`,
       );
     }
+  }
+
+  if (input.lastRecall) {
+    const r = input.lastRecall;
+    lines.push("");
+    lines.push("Last recall:");
+    lines.push(`  session: ${r.sessionKey}`);
+    lines.push(`  at: ${new Date(r.at).toISOString()}`);
+    lines.push(`  prompt: ${r.promptPreview}`);
+    lines.push(`  candidates: ${r.candidates.length > 0 ? r.candidates.join(", ") : "(none)"}`);
+    lines.push(`  KG facts: ${r.kgFactCount}`);
+    lines.push(`  search results: ${r.searchResultCount}`);
+    lines.push(`  injected lines: ${r.injectedLineCount}`);
+    lines.push(`  identity included: ${r.identityIncluded ? "yes" : "no"}`);
   }
 
   if (input.metrics) {

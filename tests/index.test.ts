@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildRuntimeDisclosure,
   kgConfidenceThresholdForSource,
   kgSourceClosetForRole,
   resolvePluginUserConfig,
@@ -60,5 +61,19 @@ describe("KG provenance helpers", () => {
   it("maps source roles to MemPalace source_closet values", () => {
     expect(kgSourceClosetForRole("user")).toBe("openclaw:user");
     expect(kgSourceClosetForRole("assistant")).toBe("openclaw:assistant");
+  });
+});
+
+describe("buildRuntimeDisclosure", () => {
+  it("makes the active memory plugin impossible to miss", () => {
+    const text = buildRuntimeDisclosure().join("\n");
+    expect(text).toContain("Active Memory Plugin (remempalace)");
+    expect(text).toContain("OpenClaw memory plugin = remempalace");
+  });
+
+  it("distinguishes remempalace recall from workspace files", () => {
+    const text = buildRuntimeDisclosure().join("\n");
+    expect(text).toMatch(/separate from workspace files/i);
+    expect(text).toMatch(/\/remempalace status/);
   });
 });

@@ -164,7 +164,13 @@ describe("buildTieredInjection", () => {
 
   it("labels KG facts as authoritative so the model can distinguish them from search drawers", () => {
     const facts: KgFact[] = [
-      { subject: "remempalace", predicate: "status", object: "enabled", valid_from: "2026-04-23" },
+      {
+        subject: "remempalace",
+        predicate: "status",
+        object: "enabled",
+        valid_from: "2026-04-23",
+        source_closet: "openclaw:user",
+      },
     ];
     const budget: InjectionBudget = { maxTokens: 500, allowedTiers: ["L0"], contextFillRatio: 0.5 };
     const out = buildTieredInjection({
@@ -176,6 +182,22 @@ describe("buildTieredInjection", () => {
     });
     const joined = out.join("\n");
     expect(joined.toLowerCase()).toContain("authoritative");
+    expect(joined).toContain("source=remempalace KG");
+    expect(joined).toContain("source=openclaw:user");
+  });
+
+  it("labels search hits with source and confidence", () => {
+    const budget: InjectionBudget = { maxTokens: 500, allowedTiers: ["L1"], contextFillRatio: 0.5 };
+    const out = buildTieredInjection({
+      kgFacts: [],
+      searchResults: sampleResults,
+      budget,
+      tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+      useAaak: true,
+    });
+    const joined = out.join("\n");
+    expect(joined).toContain("source=remempalace search");
+    expect(joined).toContain("confidence=0.50");
   });
 
   it("records per-tier injection token totals into metrics", () => {

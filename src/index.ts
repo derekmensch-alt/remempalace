@@ -30,7 +30,7 @@ import { loadIdentityContext } from "./identity.js";
 import { compactIdentity } from "./identity-compact.js";
 import { isTimelineQuery, queryTimeline } from "./timeline.js";
 import { MempalaceMemoryRuntime } from "./memory-runtime.js";
-import { buildStatusReport } from "./status-command.js";
+import { buildStatusReport, type LastRecallStatus } from "./status-command.js";
 import { Metrics } from "./metrics.js";
 import { DiaryReconciler, computeDiaryHealth } from "./diary-replay.js";
 
@@ -145,6 +145,17 @@ function normalizeKgResult(raw: unknown): KgFact[] {
   return [];
 }
 
+export function buildRuntimeDisclosure(): string[] {
+  return [
+    "## Active Memory Plugin (remempalace)",
+    "",
+    "runtime slot: OpenClaw memory plugin = remempalace",
+    "scope: remempalace recall is separate from workspace files or local markdown notes",
+    "audit: use /remempalace status to see the most recent recall candidates and counts",
+    "",
+  ];
+}
+
 const plugin = {
   id: "remempalace",
   name: "remempalace",
@@ -215,6 +226,7 @@ const plugin = {
     const cachedBySession = new Map<string, string[] | null>();
     const sessionMessages = new Map<string, SessionMessage[]>();
     const learnedKgKeys = new Set<string>();
+    let lastRecall: LastRecallStatus | null = null;
     const sessionStartCache = new Map<
       string,
       { status: unknown; diaryEntries: unknown[]; identity: { soul: string; identity: string } }
@@ -365,6 +377,7 @@ const plugin = {
           try {
             const tl = await queryTimeline(mcp, { daysBack: 7 });
             const lines = [
+              ...buildRuntimeDisclosure(),
               "## Timeline Context (remempalace)",
               "",
               ...tl.diary.map((d) => `- ${d.date}: ${d.content.slice(0, 200)}`),
@@ -390,7 +403,7 @@ const plugin = {
 
         const budget = budgetManager.compute({ conversationTokens, contextWindow });
 
-        if (budget.allowedTiers.length === 0) return;
+        const lines: string[] = buildRuntimeDisclosure();
 
         // Compact identity and prepend when L0 tier is allowed
         const start = sessionStartCache.get(sessionKey);
@@ -436,8 +449,6 @@ const plugin = {
             metrics,
           });
 
-          const lines: string[] = [];
-
           if (identityCompacted) {
             lines.push("## Identity (remempalace)", "", identityCompacted, "");
           }
@@ -456,7 +467,16 @@ const plugin = {
             finalLineCount: lines.length,
             finalBlock: lines.join("\n"),
           });
-          if (lines.length === 0) return;
+          lastRecall = {
+            sessionKey,
+            promptPreview: prompt.slice(0, 160),
+            candidates,
+            kgFactCount: kgFacts.length,
+            searchResultCount: bundle.searchResults.length,
+            injectedLineCount: injected.length,
+            identityIncluded: identityCompacted.length > 0,
+            at: Date.now(),
+          };
           cachedBySession.set(sessionKey, lines);
 
           // Return the block as prependSystemContext — openclaw's
@@ -476,6 +496,18 @@ const plugin = {
         } catch (err) {
           await debugLog("before_prompt_build:error", { sessionKey, error: (err as Error).message });
           logger.warn(`recall failed: ${(err as Error).message}`);
+          cachedBySession.set(sessionKey, lines);
+          lastRecall = {
+            sessionKey,
+            promptPreview: prompt.slice(0, 160),
+            candidates: [],
+            kgFactCount: 0,
+            searchResultCount: 0,
+            injectedLineCount: 0,
+            identityIncluded: false,
+            at: Date.now(),
+          };
+          return { prependSystemContext: lines.join("\n") };
         }
       });
 
@@ -543,6 +575,7 @@ const plugin = {
               kgCache: kgCache.stats(),
               metrics: metrics.snapshot(),
               diary: diaryStatus,
+              lastRecall,
             }),
           };
         },
