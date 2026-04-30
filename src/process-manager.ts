@@ -45,12 +45,19 @@ export class ProcessManager {
   async stop(): Promise<void> {
     if (!this.proc || this.proc.killed) return;
     return new Promise((resolve) => {
-      if (!this.proc) return resolve();
-      this.proc.once("exit", () => resolve());
-      this.proc.kill("SIGTERM");
-      setTimeout(() => {
-        if (this.proc && !this.proc.killed) this.proc.kill("SIGKILL");
+      const proc = this.proc;
+      if (!proc) return resolve();
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
       }, 2000);
+      proc.once("exit", () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      });
+      proc.kill("SIGTERM");
     });
   }
 

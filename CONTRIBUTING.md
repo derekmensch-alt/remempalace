@@ -6,7 +6,7 @@ Thanks for your interest. remempalace is small enough that a single dev can hold
 
 ## Ground rules
 
-1. **Tests first.** Every change ships with tests. The test suite is fast (~1.5s for 134 unit tests) — there's no excuse.
+1. **Tests first.** Every change ships with tests. The test suite is fast — there's no excuse.
 2. **No silent behavior changes.** If you change a default or rename a config field, document the migration in the PR.
 3. **Keep modules small.** Files over ~400 lines get refactored. Many small files > few large files.
 4. **Don't expand the plugin's surface area without a use case.** Memory plugins should do one job.
@@ -20,10 +20,12 @@ Same prerequisites as the install — see [INSTALL.md → Prerequisites](INSTALL
 ```bash
 git clone <repo-url> remempalace
 cd remempalace
-npm install
+npm ci
 ```
 
-You don't *need* a working MemPalace install to develop most of the plugin — 134 of 136 tests run with mocked MCP calls and require nothing external.
+You don't *need* a working MemPalace install to develop most of the plugin — the default suite uses mocked MCP calls and skips the real MemPalace integration tests unless you opt in.
+
+Use `npm ci` for routine setup and verification. It installs from `package-lock.json` and is still preferred over `npm install` for normal test runs. npm `10.9.x` can rewrite optional dependency `libc` metadata even when dependency versions do not change; WSL installs on `/mnt/c/...` can also create line-ending-only lockfile churn. Prefer a WSL-native checkout for dependency work, check `git diff -- package-lock.json` before committing, and restore lockfile-only churn unless you intentionally regenerated dependencies.
 
 For the two integration tests that hit a real MemPalace MCP server:
 
@@ -41,7 +43,7 @@ REMEMPALACE_TEST_PY=$(which python3) npm test
 
 ```bash
 # Run the test suite
-npm test                    # 134 unit + 2 skipped integration
+npm test                    # default suite; real MemPalace integration tests are skipped unless configured
 npx vitest run --reporter=dot   # quieter
 
 # Type-check without emitting

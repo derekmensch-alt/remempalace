@@ -7,12 +7,14 @@ import * as os from "node:os";
 interface MockMcp {
   callTool: ReturnType<typeof vi.fn>;
   isReady: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
 }
 
 function makeMcp(overrides: Partial<MockMcp> = {}): MockMcp {
   return {
     callTool: vi.fn().mockResolvedValue({ results: [] }),
     isReady: vi.fn().mockReturnValue(true),
+    stop: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -24,7 +26,11 @@ describe("MempalaceMemoryRuntime", () => {
 
   beforeEach(() => {
     mcp = makeMcp();
-    runtime = new MempalaceMemoryRuntime({ mcp: mcp as never, similarityThreshold: 0.25 });
+    runtime = new MempalaceMemoryRuntime({
+      mcp: mcp as never,
+      similarityThreshold: 0.25,
+      allowedReadRoots: [process.cwd()],
+    });
   });
 
   describe("resolveMemoryBackendConfig", () => {
@@ -46,6 +52,24 @@ describe("MempalaceMemoryRuntime", () => {
       const result = await runtime.getMemorySearchManager({ cfg, agentId: "default" });
       expect(result.manager).toBeNull();
       expect(result.error).toMatch(/mcp/i);
+    });
+
+    it("waits for plugin initialization before checking MCP readiness", async () => {
+      const waitUntilReady = vi.fn().mockImplementation(async () => {
+        mcp.isReady.mockReturnValue(true);
+      });
+      mcp.isReady.mockReturnValue(false);
+      runtime = new MempalaceMemoryRuntime({
+        mcp: mcp as never,
+        similarityThreshold: 0.25,
+        allowedReadRoots: [process.cwd()],
+        waitUntilReady,
+      });
+
+      const result = await runtime.getMemorySearchManager({ cfg, agentId: "default" });
+
+      expect(waitUntilReady).toHaveBeenCalledTimes(1);
+      expect(result.manager).not.toBeNull();
     });
   });
 
@@ -108,6 +132,11 @@ describe("MempalaceMemoryRuntime", () => {
       const status = manager!.status();
       expect(status.backend).toBe("builtin");
       expect(status.provider).toBe("mempalace");
+      expect(status.files).toBe(0);
+      expect(status.chunks).toBe(0);
+      expect(status.sources).toEqual(["memory"]);
+      expect(status.vector).toEqual({ enabled: true, available: true });
+      expect(status.fts).toEqual({ enabled: false, available: false });
     });
 
     it("probeEmbeddingAvailability reflects MCP readiness", async () => {
@@ -128,8 +157,28 @@ describe("MempalaceMemoryRuntime", () => {
   });
 
   describe("closeAllMemorySearchManagers", () => {
-    it("is a no-op that resolves cleanly", async () => {
+    it("stops the MCP client and resolves cleanly", async () => {
       await expect(runtime.closeAllMemorySearchManagers()).resolves.toBeUndefined();
+      expect(mcp.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it("status-purpose manager close stops the MCP client", async () => {
+      const { manager } = await runtime.getMemorySearchManager({
+        cfg,
+        agentId: "default",
+        purpose: "status",
+      });
+      await expect(manager!.close?.()).resolves.toBeUndefined();
+      expect(mcp.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it("default-purpose manager close is not exposed for the long-lived gateway path", async () => {
+      const { manager } = await runtime.getMemorySearchManager({
+        cfg,
+        agentId: "default",
+        purpose: "default",
+      });
+      expect(manager!.close).toBeUndefined();
     });
   });
 });
@@ -202,10 +251,31 @@ describe("readFile sandbox", () => {
 
     // Symlink from inside allowedRoot to the outside file
     const symlinkPath = path.join(allowedRoot, "link-to-outside.txt");
-    fs.symlinkSync(outsideFile, symlinkPath);
+    let realpathSpy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      fs.symlinkSync(outsideFile, symlinkPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EACCES") {
+        throw err;
+      }
+
+      // Windows often requires Developer Mode or elevated privileges for
+      // symlink creation. Simulate the important part of the security case:
+      // the requested path resolves to a target outside the allowlist.
+      fs.writeFileSync(symlinkPath, "placeholder");
+      realpathSpy = vi.spyOn(fs.promises, "realpath").mockImplementation(async (target) => {
+        const targetPath = String(target);
+        if (path.resolve(targetPath) === path.resolve(symlinkPath)) {
+          return outsideFile;
+        }
+        return path.resolve(targetPath);
+      });
+    }
 
     const mgr = await getManager(runtime);
     const result = await mgr.readFile({ relPath: symlinkPath });
+    realpathSpy?.mockRestore();
 
     expect(result.text).toBe(REJECT_TEXT);
     expect(result.path).toBe(symlinkPath);

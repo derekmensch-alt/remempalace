@@ -12,6 +12,7 @@ export interface KgFact {
   object: string;
   valid_from?: string;
   valid_to?: string;
+  source_closet?: string;
   current?: boolean;
 }
 

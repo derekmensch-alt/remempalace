@@ -119,6 +119,7 @@ export class KgBatcher {
           predicate: f.predicate,
           object: f.object,
           valid_from: f.valid_from,
+          source_closet: f.source_closet,
         })
         .then(() => this.opts.metrics?.inc("kg.facts.flushed"))
         .catch(() => this.opts.metrics?.inc("kg.facts.flush_failed"));

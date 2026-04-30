@@ -77,7 +77,7 @@ You should see a JSON-RPC `result` come back within a couple of seconds. Hit `Ct
 ```bash
 git clone <repo-url> remempalace
 cd remempalace
-npm install
+npm ci
 npm run build
 ```
 
@@ -86,7 +86,8 @@ The build emits `dist/` next to `src/`. OpenClaw loads from the package root —
 Run the test suite to confirm a clean install:
 
 ```bash
-npm test          # 134 unit tests
+npm run lint
+npm test
 ```
 
 Two integration tests are skipped by default. To run them, point at your mempalace install:
@@ -97,7 +98,21 @@ REMEMPALACE_TEST_PY=$(which python3) npm test
 REMEMPALACE_TEST_PY=~/.local/share/pipx/venvs/mempalace/bin/python npm test
 ```
 
-All 136 tests should pass.
+The integration tests should run instead of being skipped.
+
+### WSL checkout location
+
+If OpenClaw runs inside WSL, clone remempalace onto a trusted Linux filesystem path, not under `/mnt/c/...`:
+
+```bash
+mkdir -p ~/.openclaw/plugins
+git clone <repo-url> ~/.openclaw/plugins/remempalace
+cd ~/.openclaw/plugins/remempalace
+npm ci
+npm run build
+```
+
+Windows-mounted paths can appear world-writable from WSL, and OpenClaw may reject them as unsafe plugin roots. Use the WSL-native path in `plugins.load.paths`, for example `/home/YOU/.openclaw/plugins/remempalace`.
 
 ---
 

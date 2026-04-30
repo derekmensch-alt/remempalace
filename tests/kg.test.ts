@@ -97,4 +97,23 @@ describe("KgBatcher", () => {
     batcher.add({ subject: "A", predicate: "p", object: "1" });
     expect(metrics.snapshot()["kg.facts.batched"]).toBeUndefined();
   });
+
+  it("passes source_closet provenance through to mempalace_kg_add", async () => {
+    const mockMcp = { callTool: vi.fn().mockResolvedValue({}) };
+    const batcher = new KgBatcher(mockMcp as any, { batchSize: 1, flushIntervalMs: 10000 });
+
+    batcher.add({
+      subject: "Derek",
+      predicate: "uses",
+      object: "OpenClaw",
+      source_closet: "openclaw:user",
+    });
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(mockMcp.callTool).toHaveBeenCalledWith(
+      "mempalace_kg_add",
+      expect.objectContaining({ source_closet: "openclaw:user" }),
+    );
+    await batcher.stop();
+  });
 });

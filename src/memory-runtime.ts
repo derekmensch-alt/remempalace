@@ -8,6 +8,7 @@ export interface MempalaceMemoryRuntimeOptions {
   similarityThreshold: number;
   callTimeoutMs?: number;
   allowedReadRoots?: string[];
+  waitUntilReady?: () => Promise<unknown>;
 }
 
 interface BackendConfig {
@@ -28,6 +29,21 @@ interface ProviderStatus {
   backend: "builtin";
   provider: string;
   model?: string;
+  files?: number;
+  chunks?: number;
+  dirty?: boolean;
+  sources?: Array<"memory" | "sessions">;
+  cache?: {
+    enabled: boolean;
+  };
+  fts?: {
+    enabled: boolean;
+    available: boolean;
+  };
+  vector?: {
+    enabled: boolean;
+    available?: boolean;
+  };
 }
 
 interface EmbeddingProbe {
@@ -54,6 +70,10 @@ export interface MempalaceSearchManager {
   probeVectorAvailability(): Promise<boolean>;
   close?(): Promise<void>;
 }
+
+type ManagedMcpClient = McpClient & {
+  stop?: () => Promise<void>;
+};
 
 function mapMempalaceResult(r: SearchResult): HostSearchResult {
   const lineCount = Math.max(1, (r.text ?? "").split("\n").length);
@@ -82,11 +102,12 @@ export class MempalaceMemoryRuntime {
     return { backend: "builtin" };
   }
 
-  async getMemorySearchManager(_params: {
+  async getMemorySearchManager(params: {
     cfg: unknown;
     agentId: string;
     purpose?: "default" | "status";
   }): Promise<{ manager: MempalaceSearchManager | null; error?: string }> {
+    await this.opts.waitUntilReady?.();
     if (!this.opts.mcp.isReady()) {
       return { manager: null, error: "mempalace MCP client is not ready" };
     }
@@ -94,7 +115,7 @@ export class MempalaceMemoryRuntime {
       // Clear the cache on build failure so the next caller retries instead of
       // re-awaiting a permanently-rejected promise.
       let wrapped: Promise<MempalaceSearchManager>;
-      wrapped = this.buildManagerAsync().catch((err) => {
+      wrapped = this.buildManagerAsync(params.purpose).catch((err) => {
         if (this.managerPromise === wrapped) {
           this.managerPromise = null;
         }
@@ -108,9 +129,10 @@ export class MempalaceMemoryRuntime {
 
   async closeAllMemorySearchManagers(): Promise<void> {
     this.managerPromise = null;
+    await (this.opts.mcp as ManagedMcpClient).stop?.();
   }
 
-  private async buildManagerAsync(): Promise<MempalaceSearchManager> {
+  private async buildManagerAsync(purpose?: "default" | "status"): Promise<MempalaceSearchManager> {
     const { mcp, similarityThreshold, allowedReadRoots } = this.opts;
     const timeoutMs = this.timeoutMs;
 
@@ -228,7 +250,17 @@ export class MempalaceMemoryRuntime {
       },
 
       status() {
-        return { backend: "builtin", provider: "mempalace" };
+        return {
+          backend: "builtin",
+          provider: "mempalace",
+          files: 0,
+          chunks: 0,
+          dirty: false,
+          sources: ["memory"],
+          cache: { enabled: true },
+          fts: { enabled: false, available: false },
+          vector: { enabled: true, available: mcp.isReady() },
+        };
       },
 
       async probeEmbeddingAvailability() {
@@ -241,6 +273,14 @@ export class MempalaceMemoryRuntime {
       async probeVectorAvailability() {
         return true;
       },
+
+      close:
+        purpose === "status"
+          ? async () => {
+              this.managerPromise = null;
+              await (mcp as ManagedMcpClient).stop?.();
+            }
+          : undefined,
     };
   }
 }

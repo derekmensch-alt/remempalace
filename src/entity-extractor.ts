@@ -30,6 +30,13 @@ export function extractEntityCandidates(
     }
   }
 
+  if (
+    /\b(?:memory\s+(?:plugin|system|backend|provider)|what\s+memory|which\s+memory)\b/i.test(prompt)
+  ) {
+    const memoryPlugin = knownEntities.find((entity) => entity.toLowerCase() === "remempalace");
+    if (memoryPlugin) addCandidate(memoryPlugin);
+  }
+
   const capPattern = /\b[A-Z][\w]{2,}\b/g;
   for (const match of prompt.matchAll(capPattern)) {
     if (match[0].length >= minLength) {

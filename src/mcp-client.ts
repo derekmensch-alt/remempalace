@@ -24,12 +24,15 @@ interface PendingCall {
   timer: NodeJS.Timeout;
 }
 
+const sharedClients = new Map<string, McpClient>();
+
 export class McpClient {
   private pm: ProcessManager;
   private nextId = 1;
   private pending = new Map<number, PendingCall>();
   private buffer = "";
   private initialized = false;
+  private startPromise: Promise<void> | null = null;
   hasDiaryWrite = false;
   hasDiaryRead = false;
   hasKgInvalidate = false;
@@ -46,16 +49,27 @@ export class McpClient {
     });
     this.pm.onExit((code) => {
       console.warn(`[remempalace:mcp-exit] python child exited code=${code}`);
+      this.initialized = false;
+      this.startPromise = null;
       this.failAllPending();
     });
   }
 
   async start(): Promise<void> {
-    await this.pm.start();
-    await this.initialize();
+    if (this.isReady()) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startOnce();
+    try {
+      await this.startPromise;
+    } catch (err) {
+      this.startPromise = null;
+      throw err;
+    }
   }
 
   async stop(): Promise<void> {
+    this.initialized = false;
+    this.startPromise = null;
     this.failAllPending();
     await this.pm.stop();
   }
@@ -108,11 +122,21 @@ export class McpClient {
     this.initialized = true;
   }
 
+  private async startOnce(): Promise<void> {
+    await this.pm.start();
+    if (!this.initialized) await this.initialize();
+  }
+
   async call(method: string, params: Record<string, unknown>, timeoutMs = 10000): Promise<McpResponse> {
     const id = this.nextId++;
     const req = McpClient.formatRequest(id, method, params);
     const pending = this.expect(id, timeoutMs);
-    this.pm.writeStdin(req + "\n");
+    try {
+      this.pm.writeStdin(req + "\n");
+    } catch (err) {
+      this.clearPending(id);
+      throw err;
+    }
     return pending;
   }
 
@@ -173,11 +197,33 @@ export class McpClient {
     this.pending.clear();
   }
 
+  private clearPending(id: number): void {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pending.delete(id);
+  }
+
   static formatRequest(id: number, method: string, params: Record<string, unknown>): string {
     return JSON.stringify({ jsonrpc: "2.0", id, method, params });
   }
 
   static parseResponse(raw: string): McpResponse {
     return JSON.parse(raw) as McpResponse;
+  }
+
+  static shared(opts: McpClientOptions): McpClient {
+    const key = opts.pythonBin;
+    const existing = sharedClients.get(key);
+    if (existing) return existing;
+    const client = new McpClient(opts);
+    sharedClients.set(key, client);
+    return client;
+  }
+
+  static async resetSharedForTests(): Promise<void> {
+    const clients = Array.from(sharedClients.values());
+    sharedClients.clear();
+    await Promise.all(clients.map((client) => client.stop().catch(() => {})));
   }
 }

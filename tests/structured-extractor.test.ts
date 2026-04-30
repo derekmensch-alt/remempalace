@@ -13,7 +13,22 @@ describe("extractStructuredFacts — preference category", () => {
 
   it("captures 'X prefers Y' as preference", () => {
     const facts = extractStructuredFacts("Derek prefers Rust over Go.");
-    expect(facts.some((f) => f.category === "preference" && f.subject === "Derek")).toBe(true);
+    expect(
+      facts.some(
+        (f) =>
+          f.category === "preference" &&
+          f.subject === "Derek" &&
+          f.predicate === "prefers" &&
+          f.object === "Rust over Go",
+      ),
+    ).toBe(true);
+  });
+
+  it("captures conjoined likes as separate stable preference facts", () => {
+    const facts = extractStructuredFacts("Derek likes TypeScript and Rust.");
+    expect(
+      facts.filter((f) => f.subject === "Derek" && f.predicate === "likes").map((f) => f.object),
+    ).toEqual(["TypeScript", "Rust"]);
   });
 
   it("downscores hedged preferences", () => {
@@ -41,6 +56,22 @@ describe("extractStructuredFacts — identity category", () => {
       ),
     ).toBe(true);
   });
+
+  it("captures conjoined employers as separate stable identity facts", () => {
+    const facts = extractStructuredFacts("Derek works at OpenAI and Anthropic.");
+    expect(
+      facts
+        .filter((f) => f.subject === "Derek" && f.predicate === "works_at")
+        .map((f) => f.object),
+    ).toEqual(["OpenAI", "Anthropic"]);
+  });
+
+  it("captures conjoined roles as separate identity facts", () => {
+    const facts = extractStructuredFacts("Derek is an engineer and founder.");
+    expect(
+      facts.filter((f) => f.subject === "Derek" && f.predicate === "is_a").map((f) => f.object),
+    ).toEqual(["engineer", "founder"]);
+  });
 });
 
 describe("extractStructuredFacts — project_state category", () => {
@@ -48,6 +79,23 @@ describe("extractStructuredFacts — project_state category", () => {
     const facts = extractStructuredFacts("remempalace is using vitest for testing.");
     const ps = facts.find((f) => f.category === "project_state");
     expect(ps).toBeDefined();
+  });
+
+  it("keeps tool/purpose predicates stable for compound usage", () => {
+    const facts = extractStructuredFacts(
+      "Derek is using vitest for testing and playwright for e2e.",
+    );
+    expect(facts.map((f) => f.predicate)).not.toContain("uses_for_testing_and_playwright_for_e2e");
+    expect(
+      facts
+        .filter((f) => f.subject === "Derek" && f.predicate === "uses")
+        .map((f) => f.object),
+    ).toEqual(["vitest", "playwright"]);
+    expect(
+      facts
+        .filter((f) => f.subject === "Derek" && f.predicate === "used_for")
+        .map((f) => f.object),
+    ).toEqual(["vitest for testing", "playwright for e2e"]);
   });
 
   it("captures 'we shipped X' as project_state decision-adjacent", () => {
@@ -111,13 +159,22 @@ describe("extractStructuredFacts — confidence + filtering", () => {
     }
   });
 
-  it("emits zero-confidence (or skips) for explicit denials", () => {
+  it("skips explicit denials instead of emitting low-confidence positive facts", () => {
     const facts = extractStructuredFacts("Derek does not use OpenClaw.");
-    const deniedFact = facts.find(
-      (f) => f.subject === "Derek" && f.object === "OpenClaw" && f.predicate === "uses",
-    );
-    if (deniedFact) {
-      expect(deniedFact.confidence).toBeLessThanOrEqual(0.2);
+    expect(
+      facts.some((f) => f.subject === "Derek" && f.object === "OpenClaw" && f.predicate === "uses"),
+    ).toBe(false);
+  });
+
+  it("applies the skip policy consistently across common negation forms", () => {
+    const examples = [
+      "Derek is not a manager.",
+      "Derek no longer uses OpenClaw.",
+      "Derek doesn't like Rust.",
+      "Derek is using vitest for testing, but not playwright.",
+    ];
+    for (const example of examples) {
+      expect(extractStructuredFacts(example)).toEqual([]);
     }
   });
 
@@ -147,5 +204,79 @@ describe("extractStructuredFacts — opts", () => {
     for (const f of facts) {
       expect(f.confidence).toBeGreaterThanOrEqual(0.8);
     }
+  });
+});
+
+describe("extractStructuredFacts — adversarial critique matrix", () => {
+  const cases: Array<{
+    name: string;
+    text: string;
+    expected: Array<{ subject: string; predicate: string; object: string }>;
+  }> = [
+    {
+      name: "preference comparisons preserve comparison text",
+      text: "Derek prefers Rust over Go.",
+      expected: [{ subject: "Derek", predicate: "prefers", object: "Rust over Go" }],
+    },
+    {
+      name: "conjoined preferences are split",
+      text: "Derek likes TypeScript and Rust.",
+      expected: [
+        { subject: "Derek", predicate: "likes", object: "TypeScript" },
+        { subject: "Derek", predicate: "likes", object: "Rust" },
+      ],
+    },
+    {
+      name: "conjoined employers are split",
+      text: "Derek works at OpenAI and Anthropic.",
+      expected: [
+        { subject: "Derek", predicate: "works_at", object: "OpenAI" },
+        { subject: "Derek", predicate: "works_at", object: "Anthropic" },
+      ],
+    },
+    {
+      name: "compound tool/purpose clauses use stable predicates",
+      text: "Derek is using vitest for testing and playwright for e2e.",
+      expected: [
+        { subject: "Derek", predicate: "uses", object: "vitest" },
+        { subject: "Derek", predicate: "used_for", object: "vitest for testing" },
+        { subject: "Derek", predicate: "uses", object: "playwright" },
+        { subject: "Derek", predicate: "used_for", object: "playwright for e2e" },
+      ],
+    },
+    {
+      name: "multiple roles are split",
+      text: "Derek is an engineer and founder.",
+      expected: [
+        { subject: "Derek", predicate: "is_a", object: "engineer" },
+        { subject: "Derek", predicate: "is_a", object: "founder" },
+      ],
+    },
+  ];
+
+  for (const c of cases) {
+    it(c.name, () => {
+      const facts = extractStructuredFacts(c.text);
+      expect(facts.map((f) => `${f.subject}|${f.predicate}|${f.object}`)).toEqual(
+        expect.arrayContaining(c.expected.map((f) => `${f.subject}|${f.predicate}|${f.object}`)),
+      );
+    });
+  }
+
+  it("skips negated critique examples", () => {
+    expect(extractStructuredFacts("Derek is not a manager.")).toEqual([]);
+  });
+
+  it("does not emit predicates outside the controlled vocabulary for critique examples", () => {
+    const facts = extractStructuredFacts(
+      [
+        "Derek prefers Rust over Go.",
+        "Derek likes TypeScript and Rust.",
+        "Derek works at OpenAI and Anthropic.",
+        "Derek is using vitest for testing and playwright for e2e.",
+        "Derek is an engineer and founder.",
+      ].join(" "),
+    );
+    expect(facts.every((f) => !f.predicate.startsWith("uses_for_"))).toBe(true);
   });
 });

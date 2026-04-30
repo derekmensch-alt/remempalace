@@ -2,9 +2,9 @@
 
 A full-lifecycle memory plugin for OpenClaw, powered by MemPalace.
 
-**Status:** Shipped — 136 tests passing, in production use.
+**Status:** Release-candidate quality and in active OpenClaw testing. Verify with `npm run build`, `npm run lint`, and `npm test`.
 
-**Docs:** [Install](INSTALL.md) · [Configure](CONFIGURATION.md) · [Troubleshoot](TROUBLESHOOTING.md) · [Architecture](docs/architecture.md) · [Contribute](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+**Docs:** [Install](INSTALL.md) · [Configure](CONFIGURATION.md) · [Troubleshoot](TROUBLESHOOTING.md) · [Smoke test](docs/openclaw-smoke-test.md) · [Architecture](docs/architecture.md) · [Contribute](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
 ## What it does
 
@@ -44,7 +44,10 @@ pipx install mempalace          # or: pip install mempalace
 # 2. Build the plugin
 git clone <repo-url> remempalace
 cd remempalace
-npm install && npm run build
+npm ci && npm run build
+
+# Optional release checks
+npm run lint && npm test
 
 # 3. Register it in ~/.openclaw/openclaw.json
 ```
@@ -67,9 +70,11 @@ npm install && npm run build
 openclaw stop && openclaw start
 ```
 
+> **WSL note:** When OpenClaw runs inside WSL, keep the plugin checkout on a trusted Linux path such as `~/.openclaw/plugins/remempalace`. OpenClaw may reject `/mnt/c/...` plugin paths because Windows-mounted directories can appear world-writable from WSL.
+
 > **Heads-up:** If `memory-core` (or another memory plugin) currently claims the `memory` slot, disable it first — the slot is exclusive. See [TROUBLESHOOTING.md → memory-slot conflict](TROUBLESHOOTING.md#memory-slot-conflict).
 
-For the full walkthrough — pipx vs pip tradeoffs, identity files, smoke test, gateway verification — see **[INSTALL.md](INSTALL.md)**.
+For the full walkthrough — pipx vs pip tradeoffs, identity files, smoke test, gateway verification — see **[INSTALL.md](INSTALL.md)** and **[docs/openclaw-smoke-test.md](docs/openclaw-smoke-test.md)**.
 
 ## Configuration
 
@@ -118,9 +123,10 @@ remempalace/
 ├── openclaw.plugin.json       # plugin manifest
 ├── docs/
 │   ├── architecture.md        # module-level architecture
+│   ├── openclaw-smoke-test.md # release/runtime smoke checklist
 │   └── superpowers/           # historical design + implementation docs
 ├── src/                       # TypeScript source (entry point: index.ts)
-└── tests/                     # 136 Vitest unit + integration tests
+└── tests/                     # Vitest unit + integration tests
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the module-level breakdown.

@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { resolvePluginUserConfig } from "../src/index.js";
+import {
+  kgConfidenceThresholdForSource,
+  kgSourceClosetForRole,
+  resolvePluginUserConfig,
+} from "../src/index.js";
 
 describe("resolvePluginUserConfig", () => {
   it("returns api.config.plugins.entries[id].config when present", () => {
@@ -40,5 +44,21 @@ describe("resolvePluginUserConfig", () => {
       },
     };
     expect(resolvePluginUserConfig(api, undefined, "remempalace")).toBeUndefined();
+  });
+});
+
+describe("KG provenance helpers", () => {
+  it("keeps user-originated facts at the configured confidence threshold", () => {
+    expect(kgConfidenceThresholdForSource(0.6, "user")).toBe(0.6);
+  });
+
+  it("requires stricter confidence for assistant-originated facts", () => {
+    expect(kgConfidenceThresholdForSource(0.6, "assistant")).toBe(0.8);
+    expect(kgConfidenceThresholdForSource(0.85, "assistant")).toBe(0.85);
+  });
+
+  it("maps source roles to MemPalace source_closet values", () => {
+    expect(kgSourceClosetForRole("user")).toBe("openclaw:user");
+    expect(kgSourceClosetForRole("assistant")).toBe("openclaw:assistant");
   });
 });

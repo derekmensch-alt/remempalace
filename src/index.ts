@@ -91,6 +91,21 @@ interface HookContext {
   sessionKey?: string;
 }
 
+export type KgFactSourceRole = "user" | "assistant" | "system";
+
+export function kgConfidenceThresholdForSource(
+  baseThreshold: number,
+  sourceRole: KgFactSourceRole,
+): number {
+  if (sourceRole === "assistant") return Math.max(baseThreshold, 0.8);
+  if (sourceRole === "system") return Math.max(baseThreshold, 0.7);
+  return baseThreshold;
+}
+
+export function kgSourceClosetForRole(sourceRole: KgFactSourceRole): string {
+  return `openclaw:${sourceRole}`;
+}
+
 function extractText(msg: { role?: string; content?: unknown }): string {
   const c = msg.content;
   if (typeof c === "string") return c;
@@ -141,7 +156,7 @@ const plugin = {
     logger.info(`config resolved: pythonBin=${cfg.mcpPythonBin}`);
 
     const metrics = new Metrics();
-    const mcp = new McpClient({ pythonBin: cfg.mcpPythonBin });
+    const mcp = McpClient.shared({ pythonBin: cfg.mcpPythonBin });
     const searchCache = new MemoryCache<SearchResult[]>({
       capacity: cfg.cache.capacity,
       ttlMs: cfg.cache.ttlMs,
@@ -159,10 +174,12 @@ const plugin = {
       metrics,
     });
 
+    let initPromise: Promise<void>;
     const memoryRuntime = new MempalaceMemoryRuntime({
       mcp,
       similarityThreshold: cfg.injection.similarityThreshold,
       allowedReadRoots: cfg.memoryRuntime.allowedReadRoots,
+      waitUntilReady: () => initPromise,
     });
 
     const diaryReconciler = new DiaryReconciler({
@@ -171,7 +188,7 @@ const plugin = {
       metrics,
     });
 
-    const initPromise = mcp
+    initPromise = mcp
       .start()
       .then(async () => {
         logger.info("MCP client started");
@@ -197,6 +214,7 @@ const plugin = {
 
     const cachedBySession = new Map<string, string[] | null>();
     const sessionMessages = new Map<string, SessionMessage[]>();
+    const learnedKgKeys = new Set<string>();
     const sessionStartCache = new Map<
       string,
       { status: unknown; diaryEntries: unknown[]; identity: { soul: string; identity: string } }
@@ -217,6 +235,43 @@ const plugin = {
           metrics,
         })
       : null;
+
+    const rememberLearnedKgKey = (key: string): boolean => {
+      if (learnedKgKeys.has(key)) return false;
+      learnedKgKeys.add(key);
+      if (learnedKgKeys.size > 2000) {
+        const oldest = learnedKgKeys.values().next().value;
+        if (typeof oldest === "string") learnedKgKeys.delete(oldest);
+      }
+      return true;
+    };
+
+    const learnKgFactsFromText = (text: string, sourceRole: KgFactSourceRole) => {
+      if (!kgBatcher || text.length < 5) return;
+      const all = extractStructuredFacts(text);
+      const minConfidence = kgConfidenceThresholdForSource(cfg.kg.minConfidence, sourceRole);
+      const sourceCloset = kgSourceClosetForRole(sourceRole);
+      let dropped = 0;
+      for (const f of all) {
+        metrics.inc(`kg.facts.extracted.${f.category}`);
+        metrics.inc(`kg.facts.source.${sourceRole}`);
+        if (f.confidence < minConfidence) {
+          dropped += 1;
+          continue;
+        }
+        const sourceKey = `${sourceRole}|${f.subject}|${f.predicate}|${f.object}|${f.source_span ?? ""}`;
+        if (!rememberLearnedKgKey(sourceKey)) continue;
+        metrics.inc("kg.facts.extracted");
+        kgBatcher.add({
+          subject: f.subject,
+          predicate: f.predicate,
+          object: f.object,
+          valid_from: f.valid_from,
+          source_closet: sourceCloset,
+        });
+      }
+      if (dropped > 0) metrics.inc("kg.facts.dropped_low_confidence", dropped);
+    };
 
     const heartbeat = new HeartbeatWarmer({
       intervalMs: 30 * 60 * 1000,
@@ -253,7 +308,12 @@ const plugin = {
         const hctx = ctx as HookContext;
         const key = hctx?.sessionKey ?? "default";
         if (ev.historyMessages) {
-          sessionMessages.set(key, ev.historyMessages as SessionMessage[]);
+          const messages = ev.historyMessages as SessionMessage[];
+          sessionMessages.set(key, messages);
+          for (const message of messages) {
+            if (message.role !== "user") continue;
+            learnKgFactsFromText(extractText(message), "user");
+          }
         }
       });
 
@@ -273,29 +333,8 @@ const plugin = {
         api.on("llm_output", (event: unknown) => {
           const ev = event as { assistantTexts?: string[] };
           if (!ev.assistantTexts) return;
-          const minConfidence = cfg.kg.minConfidence;
           for (const text of ev.assistantTexts) {
-            const all = extractStructuredFacts(text);
-            const kept: typeof all = [];
-            let dropped = 0;
-            for (const f of all) {
-              metrics.inc(`kg.facts.extracted.${f.category}`);
-              if (f.confidence < minConfidence) {
-                dropped += 1;
-                continue;
-              }
-              kept.push(f);
-            }
-            if (dropped > 0) metrics.inc("kg.facts.dropped_low_confidence", dropped);
-            metrics.inc("kg.facts.extracted", kept.length);
-            for (const f of kept) {
-              kgBatcher.add({
-                subject: f.subject,
-                predicate: f.predicate,
-                object: f.object,
-                valid_from: f.valid_from,
-              });
-            }
+            learnKgFactsFromText(text, "assistant");
           }
         });
       }

@@ -1,0 +1,577 @@
+{
+  "schema_version": 1,
+  "project": "remempalace",
+  "created": "2026-04-29",
+  "source_inputs": [
+    "OpenClaw critique pasted by the maintainer on 2026-04-29, originally from 2026-04-26",
+    "Live WSL/OpenClaw testing on 2026-04-28 and 2026-04-29",
+    "docs/superpowers/plans/2026-04-16-remempalace-critique.md",
+    "docs/superpowers/plans/2026-04-22-remempalace-critique.md"
+  ],
+  "workflow": {
+    "selection_rule": "Pick one ready task whose dependencies are done. Update status before editing and after verification.",
+    "default_verification": [
+      "npm run build",
+      "npm test"
+    ],
+    "runtime_verification": [
+      "openclaw config validate",
+      "openclaw gateway call health --json --timeout 30000",
+      "ps -ef | grep -E \"openclaw|mempalace\" | grep -v grep"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "RT-001",
+      "title": "Enforce singleton MemPalace MCP client per plugin/runtime load",
+      "priority": "P0",
+      "status": "done",
+      "area": "runtime",
+      "depends_on": [],
+      "problem": "Real OpenClaw agent activity can still create multiple mempalace.mcp_server children under the gateway, making OpenClaw feel unresponsive and increasing CPU load.",
+      "plan": [
+        "Audit McpClient, ProcessManager, and plugin register paths for repeated starts.",
+        "Add a module-level or process-level singleton guard keyed by pythonBin and plugin id.",
+        "Ensure repeated register/runtime loads share the existing MCP client or close superseded clients deterministically.",
+        "Preserve the long-lived gateway MCP process while keeping CLI/status probes short-lived."
+      ],
+      "acceptance": [
+        "Repeated status, health, and agent probes do not leave more than one gateway-owned mempalace.mcp_server child.",
+        "Full test suite passes.",
+        "New tests cover repeated runtime load/start behavior."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npm test",
+          "openclaw gateway restart",
+          "openclaw status --deep --timeout 45000",
+          "openclaw gateway call health --json --timeout 30000",
+          "ps -ef | grep -E \"openclaw|mempalace\" | grep -v grep"
+        ]
+      },
+      "agent_prompt": "Fix remempalace MCP lifecycle so repeated plugin/runtime loads cannot create multiple long-lived MemPalace subprocesses. Keep normal gateway runtime persistent and status/CLI probes cleanly closed.",
+      "evidence": [
+        "Started RT-001: MCP singleton/lifecycle guard.",
+        "Workspace verification: npm run build plus focused vitest for mcp-client, index, memory-runtime passed with 45 tests.",
+        "Installed plugin verification: npm run build plus focused vitest for mcp-client, index, memory-runtime passed with 45 tests in /home/YOU/.openclaw/plugins/remempalace.",
+        "Runtime verification after openclaw gateway restart: gateway health OK, probe reachable, one openclaw-gateway process and one gateway-owned mempalace.mcp_server child."
+      ],
+      "changed_files": [
+        "src/mcp-client.ts",
+        "src/index.ts",
+        "tests/mcp-client.test.ts"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "RT-002",
+      "title": "Add cleanup coverage for aborts, restarts, and agent errors",
+      "priority": "P0",
+      "status": "done",
+      "area": "runtime",
+      "depends_on": [
+        "RT-001"
+      ],
+      "problem": "OpenClaw restarts and failed model calls can happen while remempalace hooks are active. Cleanup must be deterministic even when agent runs fail or commands are interrupted.",
+      "plan": [
+        "Add tests around ProcessManager stop semantics and pending MCP calls.",
+        "Ensure SIGTERM/close paths reject pending calls and clear timers.",
+        "Make cleanup idempotent if stop is called twice.",
+        "Capture behavior in TROUBLESHOOTING or runtime docs."
+      ],
+      "acceptance": [
+        "No hanging timers or orphan MCP processes after simulated stop during pending call.",
+        "ProcessManager stop is idempotent.",
+        "Gateway restart leaves one active MCP child."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npm test",
+          "openclaw gateway restart",
+          "ps -ef | grep -E \"openclaw|mempalace\" | grep -v grep"
+        ]
+      },
+      "agent_prompt": "Harden remempalace shutdown and abort paths so interrupted status probes, gateway restarts, and failed agent runs cannot leak MCP subprocesses or timers.",
+      "evidence": [
+        "Started RT-002: cleanup coverage for aborts, restarts, and agent errors.",
+        "Workspace verification: npm run build plus focused process-manager/mcp-client/memory-runtime vitest passed with 52 tests.",
+        "Workspace verification: full npm test passed with 246 tests and 2 skipped.",
+        "Installed plugin verification: npm run build and full npm test passed with 246 tests and 2 skipped in /home/YOU/.openclaw/plugins/remempalace.",
+        "Runtime verification after openclaw gateway restart: gateway health OK, one openclaw-gateway process and one gateway-owned mempalace.mcp_server child."
+      ],
+      "changed_files": [
+        "src/process-manager.ts",
+        "src/mcp-client.ts",
+        "tests/process-manager.test.ts",
+        "tests/mcp-client.test.ts"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "KG-001",
+      "title": "Stop predicate explosion in structured extraction",
+      "priority": "P0",
+      "status": "done",
+      "area": "kg",
+      "depends_on": [],
+      "problem": "The extractor can turn free text into unstable predicates such as uses_for_testing_and_playwright_for_e2e, polluting the KG.",
+      "plan": [
+        "Define a stable predicate vocabulary in code.",
+        "Map free-text variants onto stable predicates.",
+        "Keep richer details in object text or metadata instead of predicate names.",
+        "Reject or downscore facts whose predicate cannot be normalized."
+      ],
+      "acceptance": [
+        "Extractor never emits predicates outside the controlled vocabulary unless explicitly marked experimental.",
+        "Examples like 'using vitest for testing and playwright for e2e' emit stable uses or used_for facts, not predicate explosions.",
+        "Tests cover compound tool/purpose sentences."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npx vitest run tests/structured-extractor.test.ts tests/contradiction.test.ts tests/kg-invalidate.test.ts",
+          "npm test"
+        ]
+      },
+      "agent_prompt": "Constrain remempalace structured fact extraction to a stable predicate vocabulary and prevent free-text predicate explosion while preserving useful object details.",
+      "evidence": [
+        "Started KG-001: controlled predicate vocabulary and compound extraction.",
+        "Workspace verification: npm run build plus focused KG vitest passed with 38 tests.",
+        "Workspace verification: full npm test passed with 226 tests and 2 skipped.",
+        "Installed plugin verification: npm run build and full npm test passed with 226 tests and 2 skipped in /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "src/structured-extractor.ts",
+        "tests/structured-extractor.test.ts"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "KG-002",
+      "title": "Revisit cardinality defaults for is_a and decided_to",
+      "priority": "P0",
+      "status": "done",
+      "area": "kg",
+      "depends_on": [
+        "KG-001"
+      ],
+      "problem": "The critique says is_a and decided_to are too aggressively single-cardinality. This can invalidate valid multi-role or multi-decision facts.",
+      "plan": [
+        "Audit predicate cardinality map.",
+        "Change is_a and decided_to to list cardinality.",
+        "Introduce narrower predicates for true single-cardinality cases, such as job_title or default_tool.",
+        "Update contradiction tests for multiple roles and multiple project decisions."
+      ],
+      "acceptance": [
+        "A person can have multiple is_a facts without invalidation.",
+        "A project/person can have multiple decided_to facts without invalidation.",
+        "Single-cardinality behavior remains for favorite/default/current predicates where appropriate."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npx vitest run tests/contradiction.test.ts tests/kg-invalidate.test.ts",
+          "npm test"
+        ]
+      },
+      "agent_prompt": "Update remempalace contradiction cardinality so is_a and decided_to no longer erase valid multi-valued facts. Keep strict invalidation for genuinely single-valued predicates.",
+      "evidence": [
+        "Started KG-002: cardinality defaults for is_a and decided_to.",
+        "Workspace verification: npm run build plus focused contradiction/kg-invalidate vitest passed with 20 tests.",
+        "Workspace verification: full npm test passed with 229 tests and 2 skipped.",
+        "Installed plugin verification: npm run build and full npm test passed with 229 tests and 2 skipped in /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "src/contradiction.ts",
+        "tests/contradiction.test.ts"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "KG-003",
+      "title": "Make negation policy explicit and consistent",
+      "priority": "P1",
+      "status": "done",
+      "area": "kg",
+      "depends_on": [
+        "KG-001"
+      ],
+      "problem": "Negation is partly handled by regex side effects. Some negated statements are ignored while others may be downscored, making learning inconsistent.",
+      "plan": [
+        "Choose policy: skip negated facts for now.",
+        "Document the policy in extractor code and tests.",
+        "Ensure all negated forms consistently produce no learned fact unless explicit negated-fact support is added later.",
+        "Add test cases for 'not X', 'no longer X', 'does not use X', and 'is not a manager'."
+      ],
+      "acceptance": [
+        "Negated statements consistently skip KG learning.",
+        "No negated statement accidentally creates a positive fact.",
+        "Future explicit negated-fact support is tracked as a separate follow-up if desired."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npx vitest run tests/structured-extractor.test.ts tests/contradiction.test.ts",
+          "npm test"
+        ]
+      },
+      "agent_prompt": "Make remempalace negation handling boring and consistent: skip negated facts entirely unless a later explicit negated fact model is designed.",
+      "evidence": [
+        "Started KG-003: explicit skip policy for negated facts.",
+        "Workspace verification: npm run build plus focused structured-extractor/contradiction vitest passed with 37 tests.",
+        "Workspace verification: full npm test passed with 230 tests and 2 skipped.",
+        "Installed plugin verification: npm run build and full npm test passed with 230 tests and 2 skipped in /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "src/structured-extractor.ts",
+        "tests/structured-extractor.test.ts"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "KG-004",
+      "title": "Add provenance and source weighting for learned facts",
+      "priority": "P0",
+      "status": "done",
+      "area": "kg",
+      "depends_on": [
+        "KG-001",
+        "KG-003"
+      ],
+      "problem": "Current learning is assistant-output heavy. Assistants can restate, speculate, summarize, and hallucinate; user-originated claims should be weighted higher.",
+      "plan": [
+        "Capture source role for extracted candidate facts: user, assistant, system-derived.",
+        "Extract from user messages in addition to assistant outputs.",
+        "Apply stricter confidence thresholds to assistant-originated facts.",
+        "Include provenance in KG add source metadata where supported."
+      ],
+      "acceptance": [
+        "User-originated facts can be learned.",
+        "Assistant-originated facts require higher confidence or stricter predicates.",
+        "Tests prove assistant speculation is not learned when below threshold."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npx vitest run tests/index.test.ts tests/structured-extractor.test.ts tests/kg.test.ts",
+          "npm test"
+        ]
+      },
+      "agent_prompt": "Extend remempalace fact learning to include user-message provenance and source weighting. User claims should outrank assistant restatements.",
+      "evidence": [
+        "Started KG-004: provenance/source weighting for learned facts.",
+        "Verified MemPalace KG add supports source_closet and used openclaw:user/openclaw:assistant as provenance values.",
+        "Workspace verification: npm run build plus focused index/kg/structured-extractor vitest passed with 40 tests.",
+        "Workspace verification: full npm test passed with 234 tests and 2 skipped.",
+        "Installed plugin verification: npm run build and full npm test passed with 234 tests and 2 skipped in /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "src/index.ts",
+        "src/kg.ts",
+        "src/types.ts",
+        "tests/index.test.ts",
+        "tests/kg.test.ts"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "KG-005",
+      "title": "Add adversarial structured extraction test matrix",
+      "priority": "P1",
+      "status": "done",
+      "area": "kg",
+      "depends_on": [
+        "KG-001",
+        "KG-002",
+        "KG-003"
+      ],
+      "problem": "The extractor passes targeted tests but real language edge cases can break it fast.",
+      "plan": [
+        "Add table-driven tests for compound clauses.",
+        "Cover 'X and Y', 'X over Y', multiple roles, multiple tools and purposes, and negation.",
+        "Include examples from the OpenClaw critique verbatim."
+      ],
+      "acceptance": [
+        "All critique examples have explicit tests.",
+        "Tests verify both accepted facts and intentionally skipped statements.",
+        "No test relies on snapshot ambiguity."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npx vitest run tests/structured-extractor.test.ts",
+          "npm test"
+        ]
+      },
+      "agent_prompt": "Create a nasty, table-driven structured extraction test matrix using the critique examples and related adversarial language.",
+      "evidence": [
+        "Started KG-005: adversarial structured extraction matrix.",
+        "Workspace verification: npm run build plus structured-extractor vitest passed with 30 tests.",
+        "Workspace verification: full npm test passed with 242 tests and 2 skipped.",
+        "Installed plugin verification: npm run build and full npm test passed with 242 tests and 2 skipped in /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "src/structured-extractor.ts",
+        "tests/structured-extractor.test.ts"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "TEST-001",
+      "title": "Tighten expected warning noise in tests",
+      "priority": "P1",
+      "status": "done",
+      "area": "tests",
+      "depends_on": [],
+      "problem": "Tests repeatedly print memoryRuntime.allowedReadRoots warnings. This hides real warning regressions and makes the suite feel less clean.",
+      "plan": [
+        "Decide whether empty allowedReadRoots is expected in tests or should have a default test allowlist.",
+        "For expected warnings, spy/assert them in focused tests and suppress them elsewhere.",
+        "Keep production warning behavior if it is useful."
+      ],
+      "acceptance": [
+        "Full test suite output is materially quieter.",
+        "There is still a test proving empty allowedReadRoots warns when intended.",
+        "No real warnings are swallowed globally."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npm test"
+        ]
+      },
+      "agent_prompt": "Reduce remempalace test warning noise without hiding production warnings. Assert expected warnings in focused tests and keep the full suite easier to scan.",
+      "evidence": [
+        "Started TEST-001: tighten expected warning noise in tests.",
+        "Workspace verification: npm run build plus focused memory-runtime/mcp-client vitest passed with 42 tests and no expected warning spam.",
+        "Workspace verification: full npm test passed with 246 tests and 2 skipped and no stderr warning block.",
+        "Installed plugin verification: npm run build and full npm test passed with 246 tests and 2 skipped in /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "tests/memory-runtime.test.ts",
+        "tests/mcp-client.test.ts"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "DOC-001",
+      "title": "Update README status and avoid stale precise test counts",
+      "priority": "P1",
+      "status": "done",
+      "area": "docs",
+      "depends_on": [],
+      "problem": "README and release docs can underclaim or drift from current test counts, weakening trust.",
+      "plan": [
+        "Update README to reflect current suite shape or remove exact counts.",
+        "Prefer verification commands over exact counts unless generated.",
+        "Mention WSL-native OpenClaw plugin path in install docs if not already clear."
+      ],
+      "acceptance": [
+        "README does not claim obsolete counts such as 136 tests.",
+        "Docs tell users to run npm test, npm run build, and npm run lint.",
+        "Docs mention that /mnt/c plugin paths may be blocked by OpenClaw as world-writable."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npm test"
+        ]
+      },
+      "agent_prompt": "Refresh remempalace README/release status so it matches the current tested reality without creating a new stale-count trap.",
+      "evidence": [
+        "Started DOC-001: README status and stale test-count cleanup.",
+        "Removed stale exact test-count claims from README.",
+        "Added README verification commands for npm run build, npm run lint, and npm test.",
+        "Added README WSL note about trusted Linux plugin paths and /mnt/c world-writable rejection.",
+        "Workspace verification: npm run build, npm run lint, and npm test passed with 246 tests and 2 skipped.",
+        "Copied README update into /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "README.md"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "DOC-002",
+      "title": "Document known runtime issues and mitigations",
+      "priority": "P2",
+      "status": "done",
+      "area": "docs",
+      "depends_on": [],
+      "problem": "Live testing found runtime gotchas: Ollama 503 overload, chat-channel reconnect/polling delay, /mnt/c plugin path block, and MemPalace diary fallback behavior.",
+      "plan": [
+        "Add a troubleshooting section for OpenClaw not responding.",
+        "Explain how to distinguish gateway health from model-provider overload.",
+        "Add process-count check for duplicate MemPalace children.",
+        "Document restart/cleanup commands."
+      ],
+      "acceptance": [
+        "TROUBLESHOOTING explains gateway healthy vs model overloaded.",
+        "TROUBLESHOOTING includes the one-gateway-one-MCP-child expected process state.",
+        "Known WSL path and chat-channel polling caveats are documented."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npm test"
+        ]
+      },
+      "agent_prompt": "Document the OpenClaw/remempalace runtime gotchas found during live WSL testing, especially healthy gateway vs overloaded model provider.",
+      "evidence": [
+        "Started DOC-002: known OpenClaw/remempalace runtime issues and mitigations.",
+        "Added troubleshooting section for OpenClaw not responding, including gateway health vs model-provider overload.",
+        "Documented expected one openclaw-gateway and one mempalace.mcp_server process state plus restart checks.",
+        "Documented WSL /mnt/c unsafe path rejection and WSL-native plugin checkout guidance.",
+        "Updated INSTALL to remove stale exact test counts and mention npm run lint plus WSL-native checkout guidance.",
+        "Workspace verification: npm run build, npm run lint, and npm test passed with 246 tests and 2 skipped.",
+        "Copied TROUBLESHOOTING.md and INSTALL.md into /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "TROUBLESHOOTING.md",
+        "INSTALL.md"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "RT-003",
+      "title": "Add OpenClaw integration smoke checklist",
+      "priority": "P1",
+      "status": "done",
+      "area": "runtime",
+      "depends_on": [
+        "RT-001",
+        "RT-002"
+      ],
+      "problem": "We need a repeatable release smoke test for OpenClaw status, health, and process count.",
+      "plan": [
+        "Create a documented manual smoke checklist or script that does not require destructive setup.",
+        "Verify config, gateway health, memory status row, and process count.",
+        "Make it clear which commands require WSL/OpenClaw to be running."
+      ],
+      "acceptance": [
+        "A maintainer can run the smoke checklist before release.",
+        "Expected outputs are documented.",
+        "Failure modes point to specific troubleshooting sections."
+      ],
+      "verification": {
+        "commands": [
+          "openclaw config validate",
+          "openclaw status --deep --timeout 45000",
+          "openclaw gateway call health --json --timeout 30000",
+          "ps -ef | grep -E \"openclaw|mempalace\" | grep -v grep"
+        ]
+      },
+      "agent_prompt": "Add a repeatable OpenClaw smoke-test checklist for remempalace release validation.",
+      "evidence": [
+        "Started RT-003: repeatable OpenClaw integration smoke checklist.",
+        "Added docs/openclaw-smoke-test.md with build/lint/test, OpenClaw config validation, gateway health/probe, memory status, process count, and optional recall probe.",
+        "Linked smoke checklist from README and TROUBLESHOOTING.",
+        "Workspace verification: npm run build, npm run lint, and npm test passed with 246 tests and 2 skipped.",
+        "Runtime verification: openclaw config validate passed; gateway restart succeeded; health OK; probe reachable/admin-capable; status memory row showed plugin remempalace/vector ready/cache on; process list showed one gateway and one gateway-owned mempalace.mcp_server child.",
+        "Copied README, TROUBLESHOOTING, and docs/openclaw-smoke-test.md into /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "docs/openclaw-smoke-test.md",
+        "README.md",
+        "TROUBLESHOOTING.md"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "RT-004",
+      "title": "Document WSL deployment constraints",
+      "priority": "P2",
+      "status": "done",
+      "area": "docs",
+      "depends_on": [],
+      "problem": "OpenClaw blocks /mnt/c plugin paths as world-writable; remempalace must be loaded from a trusted WSL-native path.",
+      "plan": [
+        "Update install docs with WSL-native checkout guidance.",
+        "Explain why /mnt/c is blocked.",
+        "Show the working config path /home/YOU/.openclaw/plugins/remempalace as an example, while keeping user-specific paths generic."
+      ],
+      "acceptance": [
+        "INSTALL or TROUBLESHOOTING explains the world-writable path warning.",
+        "Docs show how to clone/pull into ~/.openclaw/plugins/remempalace.",
+        "Docs keep user-specific paths as examples, not hard requirements."
+      ],
+      "verification": {
+        "commands": [
+          "npm run build",
+          "npm test"
+        ]
+      },
+      "agent_prompt": "Document the WSL-native plugin checkout requirement and OpenClaw's /mnt/c world-writable path block.",
+      "evidence": [
+        "Completed alongside DOC-002.",
+        "README, INSTALL, and TROUBLESHOOTING now document WSL-native checkout guidance and explain /mnt/c world-writable plugin path rejection.",
+        "Workspace verification: npm run build, npm run lint, and npm test passed with 246 tests and 2 skipped.",
+        "Copied documentation updates into /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "README.md",
+        "INSTALL.md",
+        "TROUBLESHOOTING.md"
+      ],
+      "followups": [],
+      "active_agent": null
+    },
+    {
+      "id": "PKG-001",
+      "title": "Resolve or document npm package-lock churn",
+      "priority": "P2",
+      "status": "done",
+      "area": "packaging",
+      "depends_on": [],
+      "problem": "Running npm install in WSL changed package-lock optional dependency libc metadata, creating noisy diffs.",
+      "plan": [
+        "Determine the npm version difference causing lockfile churn.",
+        "Decide whether to commit regenerated lockfile or pin/package-manager guidance.",
+        "Document recommended npm version if needed."
+      ],
+      "acceptance": [
+        "Maintainers know whether package-lock changes are expected.",
+        "Install docs avoid accidental lockfile churn for routine testing.",
+        "No unexplained package-lock diff remains in release branch."
+      ],
+      "verification": {
+        "commands": [
+          "npm --version",
+          "node --version",
+          "npm install",
+          "git diff -- package-lock.json"
+        ]
+      },
+      "agent_prompt": "Investigate package-lock churn from WSL npm install and decide whether to normalize, commit, or document the package-manager expectation.",
+      "evidence": [
+        "Started PKG-001: package-lock optional dependency libc metadata churn investigation.",
+        "Observed WSL Node v22.22.2 and npm 10.9.7.",
+        "Confirmed npm 10.9.x rewrites package-lock optional dependency libc metadata without dependency version changes; /mnt/c checkout can also produce line-ending-only lockfile churn.",
+        "Restored package-lock.json in the workspace and installed WSL checkout so no lockfile diff remains.",
+        "Documented npm ci preference, package-lock diff check, and restore guidance in CONTRIBUTING.",
+        "Workspace verification: package-lock.json has no diff; npm run build, npm run lint, and npm test passed with 246 tests and 2 skipped.",
+        "Copied README, INSTALL, and CONTRIBUTING docs into /home/YOU/.openclaw/plugins/remempalace."
+      ],
+      "changed_files": [
+        "CONTRIBUTING.md",
+        "INSTALL.md",
+        "README.md"
+      ],
+      "followups": [],
+      "active_agent": null
+    }
+  ]
+}
