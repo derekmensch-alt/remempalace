@@ -23,7 +23,7 @@ import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
 import { summarizeSession, writeDiaryAsync } from "./diary.js";
 import { KgBatcher } from "./kg.js";
-import { extractStructuredFacts } from "./structured-extractor.js";
+import { extractStructuredFacts, extractMemoryCommands } from "./structured-extractor.js";
 import { prefetchWakeUp } from "./prefetch.js";
 import { HeartbeatWarmer } from "./heartbeat.js";
 import { loadIdentityContext } from "./identity.js";
@@ -262,6 +262,28 @@ const plugin = {
     });
 
     const cachedBySession = new Map<string, string[] | null>();
+    // Tracks sessions for which before_prompt_build has already fired and
+    // returned { prependSystemContext }.  The builder checks this set and
+    // returns [] when the hook already handled injection — preventing the same
+    // block from appearing twice when OpenClaw calls both the hook return AND
+    // the registered builder.
+    //
+    // Two injection paths exist to support both old and new OpenClaw hosts:
+    //   1. before_prompt_build return value (modern path, prependSystemContext)
+    //   2. registerMemoryCapability / registerMemoryPromptSection (legacy path)
+    //
+    // Exactly-once guarantee:
+    //   • Modern host (exposes api.on + honours hook return values):
+    //     before_prompt_build fires -> flag set -> hook return used by OpenClaw
+    //     -> builder returns [] -> single injection via hook return.
+    //   • Legacy host (does not expose api.on at all):
+    //     flag is never set -> builder fires normally -> single injection via
+    //     builder.
+    //
+    // A host that exposes api.on but ignores hook returns is treated as modern
+    // (flag is set, builder is a no-op).  In practice any host that exposes
+    // api.on honours before_prompt_build return values.
+    const hookFiredSessions = new Set<string>();
     const sessionMessages = new Map<string, SessionMessage[]>();
     const learnedKgKeys = new Set<string>();
     let lastRecall: LastRecallStatus | null = null;
@@ -362,6 +384,13 @@ const plugin = {
             if (message.role !== "user") continue;
             const clean = stripRuntimeInjectionBlocks(extractText(message));
             learnKgFactsFromText(clean, "user");
+            const cmds = extractMemoryCommands(clean);
+            if (cmds.remember.length > 0) {
+              logger.info(`memory commands — remember: ${cmds.remember.join(" | ")}`);
+            }
+            if (cmds.forget.length > 0) {
+              logger.info(`memory commands — forget: ${cmds.forget.join(" | ")}`);
+            }
           }
         }
       });
@@ -394,6 +423,10 @@ const plugin = {
         const ev = event as PromptBuildEvent;
         const hctx = ctx as HookContext & { modelId?: string; contextWindow?: number };
         const sessionKey = hctx?.sessionKey ?? "default";
+        // Mark that this hook has fired for the session.  The builder checks
+        // this flag and returns [] so it never duplicates content that has
+        // already been delivered via prependSystemContext.
+        hookFiredSessions.add(sessionKey);
         cachedBySession.set(sessionKey, null);
         const prompt = resolvePrompt(ev);
         await debugLog("before_prompt_build:enter", {
@@ -558,6 +591,18 @@ const plugin = {
     const builder = (params: unknown) => {
       const p = params as { sessionKey?: string };
       const key = p?.sessionKey ?? "default";
+      // If before_prompt_build already fired for this session, the hook return
+      // value (prependSystemContext) is the authoritative injection path.
+      // Returning [] here prevents a duplicate block when a modern OpenClaw
+      // host calls both the hook handler AND the registered memory builder.
+      // Legacy hosts that do not wire api.on events never set hookFiredSessions,
+      // so the builder remains the sole injection path for them.
+      if (hookFiredSessions.has(key)) {
+        void debugLog("builder:skipped-hook-fired", { sessionKey: key });
+        hookFiredSessions.delete(key);
+        cachedBySession.delete(key);
+        return [];
+      }
       const recallLines = cachedBySession.get(key) ?? [];
       cachedBySession.delete(key);
       const out = !mcp.hasDiaryWrite

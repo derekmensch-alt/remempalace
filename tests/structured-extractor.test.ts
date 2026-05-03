@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractStructuredFacts } from "../src/structured-extractor.js";
+import { extractStructuredFacts, extractMemoryCommands } from "../src/structured-extractor.js";
 
 describe("extractStructuredFacts — preference category", () => {
   it("captures 'X's favorite/preferred Y is Z' as preference with high confidence", () => {
@@ -278,5 +278,79 @@ describe("extractStructuredFacts — adversarial critique matrix", () => {
       ].join(" "),
     );
     expect(facts.every((f) => !f.predicate.startsWith("uses_for_"))).toBe(true);
+  });
+});
+
+describe("extractStructuredFacts — false positive / negative examples", () => {
+  it("does not extract facts from text inside double quotes (quoted attribution)", () => {
+    const facts = extractStructuredFacts('He said "I use Python"');
+    expect(facts).toEqual([]);
+  });
+
+  it("does not extract facts from sarcastic negations", () => {
+    const facts = extractStructuredFacts("Yeah right, I totally love Windows");
+    expect(facts).toEqual([]);
+  });
+
+  it("does not extract facts from hypotheticals", () => {
+    const facts = extractStructuredFacts("What if I used React instead?");
+    expect(facts).toEqual([]);
+  });
+
+  it("does not extract facts from assistant corrections", () => {
+    const facts = extractStructuredFacts("No, that's wrong, I don't use Java");
+    expect(facts).toEqual([]);
+  });
+
+  it("does not extract facts from inside backtick code spans", () => {
+    // The fact-bearing text lives only inside the backtick span.
+    const facts = extractStructuredFacts("Run `Derek uses Python` in your terminal");
+    expect(facts).toEqual([]);
+  });
+});
+
+describe("extractMemoryCommands", () => {
+  it("detects 'remember that X' → remember array", () => {
+    const result = extractMemoryCommands("Remember that my API key is in .env");
+    expect(result.remember).toHaveLength(1);
+    expect(result.remember[0]).toContain("my API key is in .env");
+    expect(result.forget).toHaveLength(0);
+  });
+
+  it("detects 'please remember X' → remember array", () => {
+    const result = extractMemoryCommands("Please remember my timezone is UTC+2");
+    expect(result.remember).toHaveLength(1);
+    expect(result.remember[0]).toContain("my timezone is UTC+2");
+  });
+
+  it("detects 'make a note that X' → remember array", () => {
+    const result = extractMemoryCommands("Make a note that the repo is on GitLab");
+    expect(result.remember).toHaveLength(1);
+    expect(result.remember[0]).toContain("the repo is on GitLab");
+  });
+
+  it("detects \"don't store this: X\" → forget array", () => {
+    const result = extractMemoryCommands("Don't store this: my password is hunter2");
+    expect(result.forget).toHaveLength(1);
+    expect(result.forget[0]).toContain("my password is hunter2");
+    expect(result.remember).toHaveLength(0);
+  });
+
+  it("detects 'forget that X' → forget array", () => {
+    const result = extractMemoryCommands("Forget that I mentioned React");
+    expect(result.forget).toHaveLength(1);
+    expect(result.forget[0]).toContain("I mentioned React");
+  });
+
+  it("detects \"don't remember X\" → forget array", () => {
+    const result = extractMemoryCommands("Don't remember my old address");
+    expect(result.forget).toHaveLength(1);
+    expect(result.forget[0]).toContain("my old address");
+  });
+
+  it("returns empty arrays for plain text with no commands", () => {
+    const result = extractMemoryCommands("Derek likes TypeScript");
+    expect(result.remember).toHaveLength(0);
+    expect(result.forget).toHaveLength(0);
   });
 });

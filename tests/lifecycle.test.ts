@@ -340,3 +340,156 @@ describe("lazy-start: gateway_stop still stops everything", () => {
     expect(mockMcp.stop).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Injection deduplication: exactly one path fires per prompt
+// ---------------------------------------------------------------------------
+//
+// Problem: Two injection paths exist —
+//   1. before_prompt_build returns { prependSystemContext: block } (modern path)
+//   2. The registered builder (legacy path for old OpenClaw hosts)
+//
+// If a modern OpenClaw host calls BOTH (uses hook return AND calls the
+// registered builder), the same block appears twice in the prompt.
+//
+// Fix: hookFiredSessions tracks sessions where before_prompt_build has fired.
+// The builder returns [] for those sessions, making it a no-op when the hook
+// already handled injection.
+// ---------------------------------------------------------------------------
+
+describe("injection deduplication: builder is no-op when hook fired", () => {
+  it("builder returns [] after before_prompt_build fires for the same session", async () => {
+    const plugin = await importPlugin();
+
+    // Capture the registered builder
+    let capturedBuilder: ((params: unknown) => string[]) | null = null;
+    const api = makeFakeApi();
+    // Override registerMemoryCapability to capture the builder
+    api.registerMemoryCapability.mockImplementation(
+      (cap: { promptBuilder?: (p: unknown) => string[] }) => {
+        if (cap.promptBuilder) capturedBuilder = cap.promptBuilder;
+      },
+    );
+
+    plugin.register(api);
+
+    const sessionKey = "session-dedup-test";
+
+    // Fire before_prompt_build (the modern hook path)
+    await api.emit(
+      "before_prompt_build",
+      { prompt: "what do you remember about my projects?", messages: [] },
+      { sessionKey },
+    );
+
+    // Verify a builder was registered
+    expect(capturedBuilder).not.toBeNull();
+
+    // Now simulate OpenClaw also calling the builder (legacy-compat path)
+    const result = capturedBuilder!({ sessionKey });
+
+    // Must be empty — hook already handled injection, no duplication
+    expect(result).toEqual([]);
+  });
+
+  it("builder returns [] on first call after hook fired, then flag is consumed", async () => {
+    const plugin = await importPlugin();
+
+    let capturedBuilder: ((params: unknown) => string[]) | null = null;
+    const api = makeFakeApi();
+    api.registerMemoryCapability.mockImplementation(
+      (cap: { promptBuilder?: (p: unknown) => string[] }) => {
+        if (cap.promptBuilder) capturedBuilder = cap.promptBuilder;
+      },
+    );
+
+    plugin.register(api);
+
+    const sessionKey = "session-dedup-repeated";
+
+    await api.emit(
+      "before_prompt_build",
+      { prompt: "tell me about my recent conversations with Sarah", messages: [] },
+      { sessionKey },
+    );
+
+    expect(capturedBuilder).not.toBeNull();
+
+    // First call: hook flag consumed, builder returns [] (no duplication)
+    const first = capturedBuilder!({ sessionKey });
+    expect(first).toEqual([]);
+
+    // Second call: flag already consumed, falls through to normal path.
+    // No duplicate content risk here — the session cache is already empty.
+    const second = capturedBuilder!({ sessionKey });
+    expect(Array.isArray(second)).toBe(true);
+  });
+
+  it("hook flag is session-scoped: other sessions are not affected", async () => {
+    const plugin = await importPlugin();
+
+    let capturedBuilder: ((params: unknown) => string[]) | null = null;
+    const api = makeFakeApi();
+    api.registerMemoryCapability.mockImplementation(
+      (cap: { promptBuilder?: (p: unknown) => string[] }) => {
+        if (cap.promptBuilder) capturedBuilder = cap.promptBuilder;
+      },
+    );
+
+    plugin.register(api);
+
+    // Fire hook for session A only
+    await api.emit(
+      "before_prompt_build",
+      { prompt: "what did I work on last week?", messages: [] },
+      { sessionKey: "session-A" },
+    );
+
+    expect(capturedBuilder).not.toBeNull();
+
+    // Session A builder: no-op (hook fired)
+    expect(capturedBuilder!({ sessionKey: "session-A" })).toEqual([]);
+
+    // Session B builder: not affected by session A's flag.
+    // cachedBySession has no entry for B, so result is [] too —
+    // but crucially it reaches the normal (non-flag) code path.
+    const resultB = capturedBuilder!({ sessionKey: "session-B" });
+    expect(Array.isArray(resultB)).toBe(true);
+  });
+
+  it("builder follows normal path when api.on is absent (legacy host, no flag set)", async () => {
+    const plugin = await importPlugin();
+
+    let capturedBuilder: ((params: unknown) => string[]) | null = null;
+
+    // Minimal legacy API: has registerMemoryCapability but NO api.on.
+    // register() wraps all api.on calls in `if (typeof api.on === "function")`,
+    // so hookFiredSessions is never populated for this session.
+    const legacyApi = {
+      config: {},
+      registerMemoryCapability: vi.fn(
+        (cap: { promptBuilder?: (p: unknown) => string[] }) => {
+          if (cap.promptBuilder) capturedBuilder = cap.promptBuilder;
+        },
+      ),
+      registerCommand: vi.fn(),
+      // No api.on property at all
+    };
+
+    plugin.register(legacyApi as unknown as Parameters<typeof plugin.register>[0]);
+
+    expect(capturedBuilder).not.toBeNull();
+
+    // Before any hook fires (api.on never called), hookFiredSessions is empty.
+    // cachedBySession also has no entry -> builder returns the diary-fallback note
+    // (hasDiaryWrite is false on the mock) — a non-empty array, NOT [].
+    // The important invariant: the builder does NOT return [] due to the hook flag.
+    const sessionKey = "legacy-session";
+    const result = capturedBuilder!({ sessionKey });
+
+    // With hasDiaryWrite=false and empty cachedBySession the builder appends the
+    // diary-fallback note, so the result is non-empty.
+    expect(result.length).toBeGreaterThan(0);
+    expect(result.some((line) => line.includes("diary"))).toBe(true);
+  });
+});

@@ -1,6 +1,115 @@
 import { dedupeWithKey } from "./dedup.js";
 import type { ExtractedFact, FactCategory } from "./types.js";
 
+// ---------------------------------------------------------------------------
+// False-positive guard: patterns that indicate the surrounding text is NOT a
+// genuine user assertion and should be stripped before rule matching.
+// ---------------------------------------------------------------------------
+
+/** Matches text inside double quotes, single quotes, or backtick blocks. */
+const QUOTED_SPAN_RE = /"[^"]*"|'[^']*'|`[^`]*`/g;
+
+/** Phrases that signal sarcasm / explicit negation of the stated claim. */
+const SARCASM_PHRASES = [
+  "obviously not",
+  "as if",
+  "yeah right",
+  "not really",
+  "i don't think",
+  "that's not true",
+];
+
+/** Phrases that signal a hypothetical scenario. */
+const HYPOTHETICAL_PHRASES = [
+  "if i ",
+  "what if ",
+  "imagine ",
+  "suppose ",
+  "hypothetically",
+];
+
+/** Phrases that signal the user is correcting the assistant, not asserting a fact. */
+const CORRECTION_PHRASES = [
+  "no, that's wrong",
+  "no that's wrong",
+  "actually,",
+  "you're mistaken",
+  "youre mistaken",
+];
+
+/**
+ * Returns true if the text should be suppressed from fact extraction because
+ * it appears to be quoted/code, sarcastic, hypothetical, or a correction.
+ */
+function isFalsePositiveContext(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (SARCASM_PHRASES.some((p) => lower.includes(p))) return true;
+  if (HYPOTHETICAL_PHRASES.some((p) => lower.includes(p))) return true;
+  if (CORRECTION_PHRASES.some((p) => lower.includes(p))) return true;
+  return false;
+}
+
+/**
+ * Strips quoted/code spans from text so rule patterns cannot match inside
+ * them, then checks the remainder for false-positive context markers.
+ */
+function preprocessForExtraction(text: string): string | null {
+  if (isFalsePositiveContext(text)) return null;
+  // Remove quoted/backtick spans to prevent matching inside them.
+  return text.replace(QUOTED_SPAN_RE, " ");
+}
+
+// ---------------------------------------------------------------------------
+// Explicit memory commands
+// ---------------------------------------------------------------------------
+
+export interface MemoryCommands {
+  remember: string[];
+  forget: string[];
+}
+
+// Sentence-end: a dot followed by whitespace or end of string, or end of string directly.
+const SENTENCE_END = "(?=\\.(?:\\s|$)|$)";
+
+const REMEMBER_RE = new RegExp(
+  `(?:please\\s+)?remember\\s+(?:that\\s+)?(.+?)${SENTENCE_END}` +
+    `|(?:make\\s+a\\s+note\\s+(?:that\\s+)?)(.+?)${SENTENCE_END}`,
+  "gi",
+);
+
+const FORGET_RE = new RegExp(
+  `(?:forget\\s+(?:that\\s+)?|don't\\s+remember\\s+|do\\s+not\\s+remember\\s+)(.+?)${SENTENCE_END}` +
+    `|(?:don't\\s+store\\s+this[:\\s]+|do\\s+not\\s+store\\s+this[:\\s]+)(.+?)${SENTENCE_END}` +
+    `|(?:ignore\\s+that|disregard\\s+that)(?:\\s*[:\\-]\\s*(.+?))?${SENTENCE_END}`,
+  "gi",
+);
+
+/**
+ * Detects explicit user memory commands in free text.
+ *
+ * @returns `{ remember, forget }` — each an array of extracted payload strings.
+ */
+export function extractMemoryCommands(text: string): MemoryCommands {
+  const remember: string[] = [];
+  const forget: string[] = [];
+
+  for (const m of text.matchAll(REMEMBER_RE)) {
+    const payload = (m[1] ?? m[2] ?? "").trim();
+    if (payload) remember.push(payload);
+  }
+
+  for (const m of text.matchAll(FORGET_RE)) {
+    const payload = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+    if (payload) forget.push(payload);
+    else if (!m[1] && !m[2] && !m[3]) {
+      // bare "ignore that" / "disregard that" with no trailing content
+      forget.push(text.trim());
+    }
+  }
+
+  return { remember, forget };
+}
+
 interface RulePack {
   category: FactCategory;
   pattern: RegExp;
@@ -261,11 +370,13 @@ export function extractStructuredFacts(
   opts: ExtractStructuredFactsOptions = {},
 ): ExtractedFact[] {
   if (!text) return [];
+  const processedText = preprocessForExtraction(text);
+  if (processedText === null) return [];
   const out: ExtractedFact[] = [];
 
   for (const rule of RULES) {
     const re = new RegExp(rule.pattern.source, rule.pattern.flags);
-    for (const m of text.matchAll(re)) {
+    for (const m of processedText.matchAll(re)) {
       const built = rule.build(m);
       const builtFacts = normalizeBuiltFacts(built);
       if (builtFacts.length === 0) continue;
