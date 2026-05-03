@@ -52,6 +52,21 @@ describe("writeDiaryAsync fallback routing", () => {
     });
     expect(appendLocalDiary).not.toHaveBeenCalled();
   });
+
+  it("passes localDir from options as diaryDir to appendLocalDiary", async () => {
+    const mockMcp = {
+      hasDiaryWrite: false,
+      callTool: vi.fn(),
+    };
+
+    writeDiaryAsync(mockMcp, "summary", undefined, { localDir: "/custom/diary/path" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(appendLocalDiary).toHaveBeenCalledOnce();
+    const call = (appendLocalDiary as ReturnType<typeof vi.fn>).mock.calls[0];
+    // Third argument is diaryDir
+    expect(call[2]).toBe("/custom/diary/path");
+  });
 });
 
 describe("appendLocalDiary (real implementation)", () => {

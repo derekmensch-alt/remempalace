@@ -145,6 +145,13 @@ function normalizeKgResult(raw: unknown): KgFact[] {
   return [];
 }
 
+const RUNTIME_BLOCK_RE =
+  /^##\s+(?:Active Memory Plugin|Memory Context|Identity|System Notes|Timeline Context)\s*\(remempalace\)[^\n]*(?:\n(?!##\s)[^\n]*)*/gm;
+
+export function stripRuntimeInjectionBlocks(text: string): string {
+  return text.replace(RUNTIME_BLOCK_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function buildRuntimeDisclosure(): string[] {
   return [
     "## Active Memory Plugin (remempalace)",
@@ -185,43 +192,74 @@ const plugin = {
       metrics,
     });
 
-    let initPromise: Promise<void>;
+    const diaryReconciler = new DiaryReconciler({
+      diaryDir: cfg.diary.localDir,
+      mcp,
+      metrics,
+      minIntervalMs: 5 * 60 * 1000,
+    });
+
+    // Declared before ensureInit so the closure can call heartbeat.start().
+    const heartbeat = new HeartbeatWarmer({
+      intervalMs: 30 * 60 * 1000,
+      warm: async () => {
+        await prefetchWakeUp(mcp, { diaryCount: cfg.prefetch.diaryCount });
+      },
+    });
+
+    // Lazy-start: MCP, heartbeat, and diary replay are deferred until the first
+    // event that needs them.  This avoids spawning a python child process during
+    // plugin registration (e.g. in environments that import the plugin but never
+    // trigger a session).
+    let _initPromise: Promise<void> | null = null;
+
+    function ensureInit(): Promise<void> {
+      if (_initPromise) return _initPromise;
+      _initPromise = mcp
+        .start()
+        .then(async () => {
+          logger.info("MCP client started");
+          await mcp.probeCapabilities().catch(() => {});
+          // Heartbeat starts only once MCP is confirmed alive.
+          heartbeat.start();
+          if (cfg.diary.replayOnStart && mcp.hasDiaryWrite) {
+            diaryReconciler
+              .replay()
+              .then((r) => {
+                if (r.attempted > 0) {
+                  logger.info(
+                    `diary replay: ${r.succeeded}/${r.attempted} succeeded, ${r.failed} failed`,
+                  );
+                }
+              })
+              .catch((err: Error) => {
+                logger.warn(`diary replay failed: ${err.message}`);
+              });
+          }
+        })
+        .catch((err: Error) => {
+          // Allow retry on next trigger by clearing the cached promise.
+          _initPromise = null;
+          logger.error(`MCP start failed: ${err.message}`);
+        });
+      return _initPromise;
+    }
+
+    // initPromise getter — allows existing `await initPromise` call-sites to keep
+    // working while the actual start is lazy.
+    const initPromise: Promise<void> = {
+      then: (...args: Parameters<Promise<void>["then"]>) => ensureInit().then(...args),
+      catch: (...args: Parameters<Promise<void>["catch"]>) => ensureInit().catch(...args),
+      finally: (...args: Parameters<Promise<void>["finally"]>) => ensureInit().finally(...args),
+      [Symbol.toStringTag]: "Promise",
+    } as Promise<void>;
+
     const memoryRuntime = new MempalaceMemoryRuntime({
       mcp,
       similarityThreshold: cfg.injection.similarityThreshold,
       allowedReadRoots: cfg.memoryRuntime.allowedReadRoots,
       waitUntilReady: () => initPromise,
     });
-
-    const diaryReconciler = new DiaryReconciler({
-      diaryDir: cfg.diary.localDir,
-      mcp,
-      metrics,
-    });
-
-    initPromise = mcp
-      .start()
-      .then(async () => {
-        logger.info("MCP client started");
-        await mcp.probeCapabilities().catch(() => {});
-        if (cfg.diary.replayOnStart && mcp.hasDiaryWrite) {
-          diaryReconciler
-            .replay()
-            .then((r) => {
-              if (r.attempted > 0) {
-                logger.info(
-                  `diary replay: ${r.succeeded}/${r.attempted} succeeded, ${r.failed} failed`,
-                );
-              }
-            })
-            .catch((err: Error) => {
-              logger.warn(`diary replay failed: ${err.message}`);
-            });
-        }
-      })
-      .catch((err: Error) => {
-        logger.error(`MCP start failed: ${err.message}`);
-      });
 
     const cachedBySession = new Map<string, string[] | null>();
     const sessionMessages = new Map<string, SessionMessage[]>();
@@ -245,6 +283,12 @@ const plugin = {
           invalidateOnConflict: cfg.kg.invalidateOnConflict,
           getMcpCaps: () => ({ hasKgInvalidate: mcp.hasKgInvalidate }),
           metrics,
+          onFactsWritten: (facts) => {
+            for (const f of facts) {
+              router.deleteKgEntity(f.subject);
+              router.deleteKgEntity(f.object);
+            }
+          },
         })
       : null;
 
@@ -285,14 +329,6 @@ const plugin = {
       if (dropped > 0) metrics.inc("kg.facts.dropped_low_confidence", dropped);
     };
 
-    const heartbeat = new HeartbeatWarmer({
-      intervalMs: 30 * 60 * 1000,
-      warm: async () => {
-        await prefetchWakeUp(mcp, { diaryCount: cfg.prefetch.diaryCount });
-      },
-    });
-    heartbeat.start();
-
     if (typeof api.on === "function") {
       api.on("session_start", async (_event: unknown, ctx: unknown) => {
         await initPromise;
@@ -324,7 +360,8 @@ const plugin = {
           sessionMessages.set(key, messages);
           for (const message of messages) {
             if (message.role !== "user") continue;
-            learnKgFactsFromText(extractText(message), "user");
+            const clean = stripRuntimeInjectionBlocks(extractText(message));
+            learnKgFactsFromText(clean, "user");
           }
         }
       });
@@ -337,11 +374,11 @@ const plugin = {
           sessionMessages.delete(key);
           const summary = summarizeSession(messages, { maxTokens: cfg.diary.maxEntryTokens });
           if (!summary) return;
-          writeDiaryAsync(mcp, summary, metrics);
+          writeDiaryAsync(mcp, summary, metrics, { localDir: cfg.diary.localDir });
         });
       }
 
-      if (kgBatcher) {
+      if (kgBatcher && cfg.kg.learnFromAssistant) {
         api.on("llm_output", (event: unknown) => {
           const ev = event as { assistantTexts?: string[] };
           if (!ev.assistantTexts) return;
@@ -564,6 +601,7 @@ const plugin = {
             }),
             pending: pending.length,
             lastReplay: diaryReconciler.lastReplayResult,
+            lastReplayError: diaryReconciler.lastReplayError,
           };
           return {
             text: buildStatusReport({

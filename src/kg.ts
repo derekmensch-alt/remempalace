@@ -22,6 +22,7 @@ const USES_PATTERN =
 const APOSTROPHE_IS_PATTERN =
   /\b([A-Z][\w]{1,32})'s?\s+(favorite|preferred|chosen|default)\s+(\w+)\s+is\s+([A-Za-z][\w\s.\-/+]{1,60})(?:\.|$|\n)/g;
 
+/** @deprecated Use extractStructuredFacts from structured-extractor.ts instead. */
 export function extractFacts(text: string): KgFact[] {
   const out: KgFact[] = [];
 
@@ -52,6 +53,7 @@ export interface KgBatcherOptions {
   invalidateOnConflict?: boolean;
   getMcpCaps?: () => { hasKgInvalidate: boolean };
   metrics?: Metrics;
+  onFactsWritten?: (facts: KgFact[]) => void;
 }
 
 export class KgBatcher {
@@ -124,6 +126,7 @@ export class KgBatcher {
         .then(() => this.opts.metrics?.inc("kg.facts.flushed"))
         .catch(() => this.opts.metrics?.inc("kg.facts.flush_failed"));
     }
+    if (batch.length > 0) this.opts.onFactsWritten?.(batch);
   }
 
   private startTimer(): void {

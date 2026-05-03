@@ -5,6 +5,7 @@ export interface DiaryStatus {
   state: DiaryHealthState;
   pending: number;
   lastReplay?: ReplayResult | null;
+  lastReplayError?: string | null;
 }
 
 export interface LastRecallStatus {
@@ -65,6 +66,9 @@ export function buildStatusReport(input: StatusReportInput): string {
       lines.push(
         `  last replay: ${lr.attempted} attempted, ${lr.succeeded} succeeded, ${lr.failed} failed (${when})`,
       );
+    }
+    if (input.diary.lastReplayError) {
+      lines.push(`  last replay error: ${input.diary.lastReplayError}`);
     }
   }
 

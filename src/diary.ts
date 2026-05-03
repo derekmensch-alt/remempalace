@@ -44,20 +44,29 @@ export function summarizeSession(
   return parts.join(" | ");
 }
 
+export interface WriteDiaryOptions {
+  localDir?: string;
+}
+
 export function writeDiaryAsync(
   mcp: { hasDiaryWrite: boolean; callTool: (name: string, args: Record<string, unknown>) => Promise<unknown> },
   summary: string,
   metrics?: Metrics,
+  options?: WriteDiaryOptions,
 ): void {
   metrics?.inc("diary.write.attempted");
   const writeJsonl = () => {
     metrics?.inc("diary.write.fallback");
-    return appendLocalDiary({
-      wing: "remempalace",
-      room: "session",
-      content: summary,
-      ts: new Date().toISOString(),
-    }).catch(() => {});
+    return appendLocalDiary(
+      {
+        wing: "remempalace",
+        room: "session",
+        content: summary,
+        ts: new Date().toISOString(),
+      },
+      undefined,
+      options?.localDir,
+    ).catch(() => {});
   };
 
   if (mcp.hasDiaryWrite) {

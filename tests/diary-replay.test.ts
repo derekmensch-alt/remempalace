@@ -232,6 +232,59 @@ describe("DiaryReconciler.replay", () => {
     expect(r.lastReplayResult?.succeeded).toBe(1);
     expect(typeof r.lastReplayResult?.at).toBe("number");
   });
+
+  it("captures lastReplayError when a write fails", async () => {
+    await writeJsonl(join(dir, "2026-04-22.jsonl"), [{ content: "a", ts: "2026-04-22T01:00:00Z" }]);
+    const callTool = vi.fn().mockRejectedValue(new Error("network timeout"));
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      mcp: { hasDiaryWrite: true, callTool },
+    });
+    expect(r.lastReplayError).toBeNull();
+    await r.replay();
+    expect(r.lastReplayError).toBe("network timeout");
+  });
+
+  it("throttles replay when called within minIntervalMs", async () => {
+    await writeJsonl(join(dir, "2026-04-22.jsonl"), [{ content: "a", ts: "2026-04-22T01:00:00Z" }]);
+    const callTool = vi.fn().mockResolvedValue({});
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      mcp: { hasDiaryWrite: true, callTool },
+      minIntervalMs: 60_000,
+    });
+    const r1 = await r.replay();
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(r1.attempted).toBe(1);
+
+    // Second call within throttle window — should be skipped
+    const r2 = await r.replay();
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(r2.skipped).toBe(true);
+    expect(r2.attempted).toBe(0);
+  });
+
+  it("deduplicates entries with the same id within a single replay pass", async () => {
+    // Write two entries that share the same id (simulates duplicate writes)
+    const entry = JSON.stringify({
+      wing: "remempalace",
+      room: "session",
+      content: "dup content",
+      ts: "2026-04-22T01:00:00Z",
+      id: "deadbeef12345678",
+    });
+    await import("node:fs/promises").then(({ writeFile }) =>
+      writeFile(join(dir, "2026-04-22.jsonl"), entry + "\n" + entry + "\n"),
+    );
+    const callTool = vi.fn().mockResolvedValue({});
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      mcp: { hasDiaryWrite: true, callTool },
+    });
+    await r.replay();
+    // Only one of the two duplicate entries should be sent
+    expect(callTool).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("computeDiaryHealth", () => {

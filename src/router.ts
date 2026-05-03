@@ -29,6 +29,26 @@ function normalizeKgResult(raw: unknown): KgFact[] {
   return [];
 }
 
+const SEARCH_QUERY_MAX_CHARS = 250;
+
+// Remempalace injection headers to strip before sending to mempalace_search.
+const INJECTION_HEADER_RE =
+  /^##\s+(?:Active Memory Plugin|Memory Context|Identity|System Notes|Timeline Context)\s*\(remempalace\)[^\n]*\n(?:(?!##\s).*\n?)*/gm;
+
+export function buildSearchQuery(prompt: string): string {
+  const stripped = prompt.replace(INJECTION_HEADER_RE, "").trim();
+  // Prefer the last user-turn when the prompt contains role-separated blocks.
+  const userTurn = stripped.match(
+    /(?:^|\n)\s*(?:user|human)\s*:\s*([^\n]*(?:\n(?!\s*(?:assistant|system)\s*:)[^\n]*)*)/i,
+  );
+  const candidate = userTurn ? userTurn[1].trim() : stripped;
+  const collapsed = candidate.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= SEARCH_QUERY_MAX_CHARS) return collapsed;
+  const hardCap = collapsed.slice(0, SEARCH_QUERY_MAX_CHARS);
+  const lastSpace = hardCap.lastIndexOf(" ");
+  return lastSpace > 0 ? hardCap.slice(0, lastSpace) : hardCap;
+}
+
 export class MemoryRouter {
   private readonly timeoutMs: number;
   private readonly knownEntities: string[];
@@ -42,7 +62,8 @@ export class MemoryRouter {
 
   async search(query: string, limit: number): Promise<SearchResult[]> {
     this.metrics?.inc("recall.search.calls");
-    const key = hashKey("mempalace_search", { query, limit });
+    const mcpQuery = buildSearchQuery(query);
+    const key = hashKey("mempalace_search", { query: mcpQuery, limit });
     const cached = this.opts.searchCache.get(key);
     if (cached) {
       this.metrics?.inc("recall.search.cache_hits");
@@ -51,7 +72,7 @@ export class MemoryRouter {
     this.metrics?.inc("recall.search.cache_misses");
     const raw = await this.opts.mcp.callTool<{ results: SearchResult[] }>(
       "mempalace_search",
-      { query, limit },
+      { query: mcpQuery, limit },
       this.timeoutMs,
     );
     const filtered = (raw.results ?? []).filter(
@@ -93,6 +114,11 @@ export class MemoryRouter {
       maxCandidates: 4,
       minLength: 3,
     });
+  }
+
+  deleteKgEntity(entity: string): void {
+    const key = hashKey("mempalace_kg_query", { entity });
+    this.opts.kgCache.delete(key);
   }
 
   async readBundle(

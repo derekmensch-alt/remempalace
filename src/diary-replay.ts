@@ -7,6 +7,7 @@ export interface DiaryEntry {
   room: string;
   content: string;
   ts: string;
+  id?: string;
   added_by?: string;
 }
 
@@ -33,6 +34,8 @@ export interface DiaryReconcilerOptions {
   diaryDir: string;
   mcp?: McpLike;
   metrics?: Metrics;
+  /** Minimum ms between replay attempts. Defaults to 0 (no throttle). */
+  minIntervalMs?: number;
 }
 
 const DAILY_FILE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -66,6 +69,7 @@ async function readReplayedSet(path: string): Promise<Set<number>> {
 
 export class DiaryReconciler {
   lastReplayResult: ReplayResult | null = null;
+  lastReplayError: string | null = null;
 
   constructor(private readonly opts: DiaryReconcilerOptions) {}
 
@@ -112,6 +116,15 @@ export class DiaryReconciler {
       return result;
     }
 
+    const minInterval = this.opts.minIntervalMs ?? 0;
+    if (minInterval > 0 && this.lastReplayResult && at - this.lastReplayResult.at < minInterval) {
+      const result: ReplayResult = {
+        attempted: 0, succeeded: 0, failed: 0, skipped: true, at,
+      };
+      this.lastReplayResult = result;
+      return result;
+    }
+
     const pending = await this.loadPending();
     if (pending.length === 0) {
       const result: ReplayResult = { attempted: 0, succeeded: 0, failed: 0, at };
@@ -122,8 +135,20 @@ export class DiaryReconciler {
     let succeeded = 0;
     let failed = 0;
     const successByDate = new Map<string, number[]>();
+    const seenIds = new Set<string>();
+    let lastError: string | null = null;
 
     for (const p of pending) {
+      if (p.entry.id) {
+        if (seenIds.has(p.entry.id)) {
+          // Duplicate id within this batch — mark as done without re-sending
+          const list = successByDate.get(p.date) ?? [];
+          list.push(p.lineNo);
+          successByDate.set(p.date, list);
+          continue;
+        }
+        seenIds.add(p.entry.id);
+      }
       this.opts.metrics?.inc("diary.replay.attempted");
       try {
         await mcp.callTool("mempalace_diary_write", {
@@ -136,8 +161,9 @@ export class DiaryReconciler {
         const list = successByDate.get(p.date) ?? [];
         list.push(p.lineNo);
         successByDate.set(p.date, list);
-      } catch {
+      } catch (err) {
         failed++;
+        lastError = err instanceof Error ? err.message : String(err);
         this.opts.metrics?.inc("diary.replay.failed");
       }
     }
@@ -151,6 +177,7 @@ export class DiaryReconciler {
       }
     }
 
+    this.lastReplayError = lastError;
     const result: ReplayResult = {
       attempted: pending.length,
       succeeded,
