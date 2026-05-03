@@ -180,6 +180,38 @@ describe("MempalaceMemoryRuntime", () => {
       });
       expect(manager!.close).toBeUndefined();
     });
+
+    it("status-purpose manager does not poison the cached default manager", async () => {
+      const statusResult = await runtime.getMemorySearchManager({
+        cfg,
+        agentId: "default",
+        purpose: "status",
+      });
+      expect(statusResult.manager!.close).toBeTypeOf("function");
+
+      const defaultResult = await runtime.getMemorySearchManager({
+        cfg,
+        agentId: "default",
+        purpose: "default",
+      });
+      expect(defaultResult.manager!.close).toBeUndefined();
+    });
+
+    it("status-purpose close does not stop MCP after the default gateway manager exists", async () => {
+      await runtime.getMemorySearchManager({
+        cfg,
+        agentId: "default",
+        purpose: "default",
+      });
+      const { manager } = await runtime.getMemorySearchManager({
+        cfg,
+        agentId: "default",
+        purpose: "status",
+      });
+
+      await expect(manager!.close?.()).resolves.toBeUndefined();
+      expect(mcp.stop).not.toHaveBeenCalled();
+    });
   });
 });
 

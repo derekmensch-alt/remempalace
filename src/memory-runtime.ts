@@ -92,7 +92,9 @@ export class MempalaceMemoryRuntime {
   private readonly timeoutMs: number;
   // Cache the build PROMISE, not the resolved value, so concurrent callers
   // share a single in-flight build instead of racing to produce two managers.
-  private managerPromise: Promise<MempalaceSearchManager> | null = null;
+  private defaultManagerPromise: Promise<MempalaceSearchManager> | null = null;
+  private statusManagerPromise: Promise<MempalaceSearchManager> | null = null;
+  private defaultManagerRequested = false;
 
   constructor(private readonly opts: MempalaceMemoryRuntimeOptions) {
     this.timeoutMs = opts.callTimeoutMs ?? 8000;
@@ -111,24 +113,38 @@ export class MempalaceMemoryRuntime {
     if (!this.opts.mcp.isReady()) {
       return { manager: null, error: "mempalace MCP client is not ready" };
     }
-    if (!this.managerPromise) {
+    const purpose = params.purpose === "status" ? "status" : "default";
+    if (purpose === "default") this.defaultManagerRequested = true;
+    const currentPromise =
+      purpose === "status" ? this.statusManagerPromise : this.defaultManagerPromise;
+    if (!currentPromise) {
       // Clear the cache on build failure so the next caller retries instead of
       // re-awaiting a permanently-rejected promise.
       let wrapped: Promise<MempalaceSearchManager>;
-      wrapped = this.buildManagerAsync(params.purpose).catch((err) => {
-        if (this.managerPromise === wrapped) {
-          this.managerPromise = null;
+      wrapped = this.buildManagerAsync(purpose).catch((err) => {
+        if (purpose === "status" && this.statusManagerPromise === wrapped) {
+          this.statusManagerPromise = null;
+        }
+        if (purpose === "default" && this.defaultManagerPromise === wrapped) {
+          this.defaultManagerPromise = null;
         }
         throw err;
       });
-      this.managerPromise = wrapped;
+      if (purpose === "status") {
+        this.statusManagerPromise = wrapped;
+      } else {
+        this.defaultManagerPromise = wrapped;
+      }
     }
-    const manager = await this.managerPromise;
+    const manager = await (purpose === "status"
+      ? this.statusManagerPromise
+      : this.defaultManagerPromise);
     return { manager };
   }
 
   async closeAllMemorySearchManagers(): Promise<void> {
-    this.managerPromise = null;
+    this.defaultManagerPromise = null;
+    this.statusManagerPromise = null;
     await (this.opts.mcp as ManagedMcpClient).stop?.();
   }
 
@@ -277,8 +293,10 @@ export class MempalaceMemoryRuntime {
       close:
         purpose === "status"
           ? async () => {
-              this.managerPromise = null;
-              await (mcp as ManagedMcpClient).stop?.();
+              this.statusManagerPromise = null;
+              if (!this.defaultManagerRequested) {
+                await (mcp as ManagedMcpClient).stop?.();
+              }
             }
           : undefined,
     };
