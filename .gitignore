@@ -6,3 +6,10 @@ dist/
 coverage/
 .claude/
 .worktrees/
+
+# Claude Code / Ruflo generated files
+CLAUDE.md
+.mcp.json
+.claude-flow/
+.swarm/
+ruvector.db
