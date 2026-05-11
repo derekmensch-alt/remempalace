@@ -5,48 +5,42 @@ import { Metrics } from "../src/metrics.js";
 import type { SearchResult } from "../src/types.js";
 
 describe("MemoryRouter", () => {
-  let mockMcp: { callTool: ReturnType<typeof vi.fn> };
+  let mockRepository: { searchMemory: ReturnType<typeof vi.fn>; queryKgEntity: ReturnType<typeof vi.fn> };
   let router: MemoryRouter;
 
   beforeEach(() => {
-    mockMcp = { callTool: vi.fn() };
+    mockRepository = { searchMemory: vi.fn(), queryKgEntity: vi.fn() };
     router = new MemoryRouter({
-      mcp: mockMcp as any,
+      repository: mockRepository as any,
       searchCache: new MemoryCache<SearchResult[]>({ capacity: 10, ttlMs: 1000 }),
       kgCache: new MemoryCache<unknown>({ capacity: 10, ttlMs: 1000 }),
       similarityThreshold: 0.25,
     });
   });
 
-  it("calls MCP search on cache miss", async () => {
-    mockMcp.callTool.mockResolvedValue({
-      results: [{ text: "hit", wing: "w", room: "r", similarity: 0.5 }],
-    });
+  it("calls repository search on cache miss", async () => {
+    mockRepository.searchMemory.mockResolvedValue([
+      { text: "hit", wing: "w", room: "r", similarity: 0.5 },
+    ]);
     const result = await router.search("hello", 5);
-    expect(mockMcp.callTool).toHaveBeenCalledWith(
-      "mempalace_search",
-      { query: "hello", limit: 5 },
-      expect.any(Number),
-    );
+    expect(mockRepository.searchMemory).toHaveBeenCalledWith({ query: "hello", limit: 5 });
     expect(result).toHaveLength(1);
   });
 
   it("returns cached results on second call with same query", async () => {
-    mockMcp.callTool.mockResolvedValue({
-      results: [{ text: "hit", wing: "w", room: "r", similarity: 0.5 }],
-    });
+    mockRepository.searchMemory.mockResolvedValue([
+      { text: "hit", wing: "w", room: "r", similarity: 0.5 },
+    ]);
     await router.search("hello", 5);
     await router.search("hello", 5);
-    expect(mockMcp.callTool).toHaveBeenCalledTimes(1);
+    expect(mockRepository.searchMemory).toHaveBeenCalledTimes(1);
   });
 
   it("filters out results below similarity threshold", async () => {
-    mockMcp.callTool.mockResolvedValue({
-      results: [
-        { text: "high", wing: "w", room: "r", similarity: 0.5 },
-        { text: "low", wing: "w", room: "r", similarity: 0.1 },
-      ],
-    });
+    mockRepository.searchMemory.mockResolvedValue([
+      { text: "high", wing: "w", room: "r", similarity: 0.5 },
+      { text: "low", wing: "w", room: "r", similarity: 0.1 },
+    ]);
     const result = await router.search("hello", 5);
     expect(result).toHaveLength(1);
     expect(result[0].text).toBe("high");
@@ -55,13 +49,13 @@ describe("MemoryRouter", () => {
   it("records search miss → call → empty results in metrics", async () => {
     const metrics = new Metrics();
     const r = new MemoryRouter({
-      mcp: mockMcp as any,
+      repository: mockRepository as any,
       searchCache: new MemoryCache<SearchResult[]>({ capacity: 10, ttlMs: 1000 }),
       kgCache: new MemoryCache<unknown>({ capacity: 10, ttlMs: 1000 }),
       similarityThreshold: 0.25,
       metrics,
     });
-    mockMcp.callTool.mockResolvedValue({ results: [] });
+    mockRepository.searchMemory.mockResolvedValue([]);
     await r.search("query", 5);
     const snap = metrics.snapshot();
     expect(snap["recall.search.calls"]).toBe(1);
@@ -72,15 +66,15 @@ describe("MemoryRouter", () => {
   it("records search cache hit on second call", async () => {
     const metrics = new Metrics();
     const r = new MemoryRouter({
-      mcp: mockMcp as any,
+      repository: mockRepository as any,
       searchCache: new MemoryCache<SearchResult[]>({ capacity: 10, ttlMs: 1000 }),
       kgCache: new MemoryCache<unknown>({ capacity: 10, ttlMs: 1000 }),
       similarityThreshold: 0.25,
       metrics,
     });
-    mockMcp.callTool.mockResolvedValue({
-      results: [{ text: "x", wing: "w", room: "r", similarity: 0.5 }],
-    });
+    mockRepository.searchMemory.mockResolvedValue([
+      { text: "x", wing: "w", room: "r", similarity: 0.5 },
+    ]);
     await r.search("q", 5);
     await r.search("q", 5);
     const snap = metrics.snapshot();
@@ -92,14 +86,15 @@ describe("MemoryRouter", () => {
   it("records kg cache miss + call + empty result", async () => {
     const metrics = new Metrics();
     const r = new MemoryRouter({
-      mcp: mockMcp as any,
+      repository: mockRepository as any,
       searchCache: new MemoryCache<SearchResult[]>({ capacity: 10, ttlMs: 1000 }),
       kgCache: new MemoryCache<unknown>({ capacity: 10, ttlMs: 1000 }),
       similarityThreshold: 0.25,
       metrics,
     });
-    mockMcp.callTool.mockResolvedValue({});
+    mockRepository.queryKgEntity.mockResolvedValue({});
     await r.kgQuery("Derek");
+    expect(mockRepository.queryKgEntity).toHaveBeenCalledWith({ entity: "Derek" });
     const snap = metrics.snapshot();
     expect(snap["recall.kg.calls"]).toBe(1);
     expect(snap["recall.kg.cache_misses"]).toBe(1);
@@ -109,13 +104,13 @@ describe("MemoryRouter", () => {
   it("records kg cache hit on second call", async () => {
     const metrics = new Metrics();
     const r = new MemoryRouter({
-      mcp: mockMcp as any,
+      repository: mockRepository as any,
       searchCache: new MemoryCache<SearchResult[]>({ capacity: 10, ttlMs: 1000 }),
       kgCache: new MemoryCache<unknown>({ capacity: 10, ttlMs: 1000 }),
       similarityThreshold: 0.25,
       metrics,
     });
-    mockMcp.callTool.mockResolvedValue({ facts: [{ subject: "x", predicate: "y", object: "z" }] });
+    mockRepository.queryKgEntity.mockResolvedValue({ facts: [{ subject: "x", predicate: "y", object: "z" }] });
     await r.kgQuery("Derek");
     await r.kgQuery("Derek");
     const snap = metrics.snapshot();
@@ -125,11 +120,17 @@ describe("MemoryRouter", () => {
 
   it("fires search and KG query in parallel", async () => {
     const callOrder: string[] = [];
-    mockMcp.callTool.mockImplementation(async (name: string) => {
-      callOrder.push(`start:${name}`);
+    mockRepository.searchMemory.mockImplementation(async () => {
+      callOrder.push("start:mempalace_search");
       await new Promise((r) => setTimeout(r, 10));
-      callOrder.push(`end:${name}`);
-      return name.includes("search") ? { results: [] } : {};
+      callOrder.push("end:mempalace_search");
+      return [];
+    });
+    mockRepository.queryKgEntity.mockImplementation(async (request: { entity: string }) => {
+      callOrder.push(`start:${request.entity}`);
+      await new Promise((r) => setTimeout(r, 10));
+      callOrder.push(`end:${request.entity}`);
+      return {};
     });
     await router.readBundle("hello", 5);
     // Both should start before either ends

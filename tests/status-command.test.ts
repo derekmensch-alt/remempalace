@@ -5,9 +5,9 @@ describe("buildStatusReport", () => {
   it("reports mcp ready + diary capabilities", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: true,
-      hasDiaryRead: true,
-      hasKgInvalidate: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
       searchCache: { hits: 10, misses: 2, size: 7 },
       kgCache: { hits: 4, misses: 1, size: 3 },
     });
@@ -23,9 +23,9 @@ describe("buildStatusReport", () => {
   it("flags diary fallback when write is missing", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: false,
-      hasDiaryRead: true,
-      hasKgInvalidate: false,
+      canWriteDiary: false,
+      canReadDiary: true,
+      canInvalidateKg: false,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
     });
@@ -36,9 +36,9 @@ describe("buildStatusReport", () => {
   it("flags MCP down when not ready", () => {
     const text = buildStatusReport({
       mcpReady: false,
-      hasDiaryWrite: false,
-      hasDiaryRead: false,
-      hasKgInvalidate: false,
+      canWriteDiary: false,
+      canReadDiary: false,
+      canInvalidateKg: false,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
     });
@@ -48,9 +48,9 @@ describe("buildStatusReport", () => {
   it("renders a Metrics section when metrics provided", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: true,
-      hasDiaryRead: true,
-      hasKgInvalidate: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
       metrics: {
@@ -70,9 +70,9 @@ describe("buildStatusReport", () => {
   it("renders 'no counters yet' when metrics is empty", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: true,
-      hasDiaryRead: true,
-      hasKgInvalidate: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
       metrics: {},
@@ -84,54 +84,56 @@ describe("buildStatusReport", () => {
   it("omits Metrics section when metrics is undefined", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: true,
-      hasDiaryRead: true,
-      hasKgInvalidate: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
     });
     expect(text).not.toMatch(/Metrics/);
   });
 
-  it("renders Diary section with mcp-healthy state when no pending entries", () => {
+  it("renders Diary section with persistent state when no pending entries", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: true,
-      hasDiaryRead: true,
-      hasKgInvalidate: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
-      diary: { state: "mcp-healthy", pending: 0 },
+      diary: { state: "persistent", persistenceState: "persistent", pending: 0 },
     });
     expect(text).toMatch(/Diary/);
-    expect(text).toMatch(/state.*mcp-healthy/i);
+    expect(text).toMatch(/state.*persistent/i);
+    expect(text).toMatch(/persistence.*verified/i);
     expect(text).toMatch(/pending.*0/i);
   });
 
-  it("renders Diary section with split-brain warning when pending > 0", () => {
+  it("renders Diary section with fallback-active warning when pending > 0", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: true,
-      hasDiaryRead: true,
-      hasKgInvalidate: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
-      diary: { state: "split-brain", pending: 75 },
+      diary: { state: "fallback-active", persistenceState: "persistent", pending: 75 },
     });
-    expect(text).toMatch(/state.*split-brain/i);
+    expect(text).toMatch(/state.*fallback-active/i);
     expect(text).toMatch(/pending.*75/i);
   });
 
   it("renders Diary section with last replay result when present", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: true,
-      hasDiaryRead: true,
-      hasKgInvalidate: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
       diary: {
         state: "degraded",
+        persistenceState: "persistent",
         pending: 5,
         lastReplay: {
           attempted: 10,
@@ -150,9 +152,9 @@ describe("buildStatusReport", () => {
   it("omits Diary section when diary is undefined", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: true,
-      hasDiaryRead: true,
-      hasKgInvalidate: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
     });
@@ -162,9 +164,9 @@ describe("buildStatusReport", () => {
   it("renders last recall audit details when available", () => {
     const text = buildStatusReport({
       mcpReady: true,
-      hasDiaryWrite: true,
-      hasDiaryRead: true,
-      hasKgInvalidate: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
       searchCache: { hits: 0, misses: 0, size: 0 },
       kgCache: { hits: 0, misses: 0, size: 0 },
       lastRecall: {

@@ -10,6 +10,10 @@ interface MockMcp {
   stop: ReturnType<typeof vi.fn>;
 }
 
+interface MockRepository {
+  searchMemory: ReturnType<typeof vi.fn>;
+}
+
 function makeMcp(overrides: Partial<MockMcp> = {}): MockMcp {
   return {
     callTool: vi.fn().mockResolvedValue({ results: [] }),
@@ -19,15 +23,25 @@ function makeMcp(overrides: Partial<MockMcp> = {}): MockMcp {
   };
 }
 
+function makeRepository(overrides: Partial<MockRepository> = {}): MockRepository {
+  return {
+    searchMemory: vi.fn().mockResolvedValue([]),
+    ...overrides,
+  };
+}
+
 describe("MempalaceMemoryRuntime", () => {
   let mcp: MockMcp;
+  let repository: MockRepository;
   let runtime: MempalaceMemoryRuntime;
   const cfg = {} as never;
 
   beforeEach(() => {
     mcp = makeMcp();
+    repository = makeRepository();
     runtime = new MempalaceMemoryRuntime({
       mcp: mcp as never,
+      repository: repository as never,
       similarityThreshold: 0.25,
       allowedReadRoots: [process.cwd()],
     });
@@ -61,6 +75,7 @@ describe("MempalaceMemoryRuntime", () => {
       mcp.isReady.mockReturnValue(false);
       runtime = new MempalaceMemoryRuntime({
         mcp: mcp as never,
+        repository: repository as never,
         similarityThreshold: 0.25,
         allowedReadRoots: [process.cwd()],
         waitUntilReady,
@@ -74,26 +89,20 @@ describe("MempalaceMemoryRuntime", () => {
   });
 
   describe("search manager", () => {
-    it("proxies search() to mempalace_search and maps results", async () => {
-      mcp.callTool.mockResolvedValueOnce({
-        results: [
-          {
-            text: "Derek uses OpenClaw",
-            wing: "tools",
-            room: "openclaw",
-            similarity: 0.82,
-            source_file: "/fixtures/palace/tools/openclaw.md",
-          },
-        ],
-      });
+    it("proxies search() to the repository and maps results", async () => {
+      repository.searchMemory.mockResolvedValueOnce([
+        {
+          text: "Derek uses OpenClaw",
+          wing: "tools",
+          room: "openclaw",
+          similarity: 0.82,
+          source_file: "/fixtures/palace/tools/openclaw.md",
+        },
+      ]);
       const { manager } = await runtime.getMemorySearchManager({ cfg, agentId: "default" });
       const results = await manager!.search("openclaw", { maxResults: 3 });
 
-      expect(mcp.callTool).toHaveBeenCalledWith(
-        "mempalace_search",
-        { query: "openclaw", limit: 3 },
-        expect.any(Number),
-      );
+      expect(repository.searchMemory).toHaveBeenCalledWith({ query: "openclaw", limit: 3 });
       expect(results).toHaveLength(1);
       expect(results[0]).toMatchObject({
         path: "/fixtures/palace/tools/openclaw.md",
@@ -106,12 +115,10 @@ describe("MempalaceMemoryRuntime", () => {
     });
 
     it("filters below similarity threshold", async () => {
-      mcp.callTool.mockResolvedValueOnce({
-        results: [
-          { text: "high", wing: "w", room: "r", similarity: 0.5 },
-          { text: "low", wing: "w", room: "r", similarity: 0.1 },
-        ],
-      });
+      repository.searchMemory.mockResolvedValueOnce([
+        { text: "high", wing: "w", room: "r", similarity: 0.5 },
+        { text: "low", wing: "w", room: "r", similarity: 0.1 },
+      ]);
       const { manager } = await runtime.getMemorySearchManager({ cfg, agentId: "default" });
       const results = await manager!.search("q");
       expect(results).toHaveLength(1);
@@ -119,9 +126,9 @@ describe("MempalaceMemoryRuntime", () => {
     });
 
     it("falls back to wing/room path when source_file is missing", async () => {
-      mcp.callTool.mockResolvedValueOnce({
-        results: [{ text: "hit", wing: "personal", room: "prefs", similarity: 0.6 }],
-      });
+      repository.searchMemory.mockResolvedValueOnce([
+        { text: "hit", wing: "personal", room: "prefs", similarity: 0.6 },
+      ]);
       const { manager } = await runtime.getMemorySearchManager({ cfg, agentId: "default" });
       const results = await manager!.search("x");
       expect(results[0].path).toBe("personal/prefs");
@@ -230,6 +237,7 @@ describe("readFile sandbox", () => {
     };
     return new MempalaceMemoryRuntime({
       mcp: mcp as never,
+      repository: makeRepository() as never,
       similarityThreshold: 0.25,
       allowedReadRoots,
     });

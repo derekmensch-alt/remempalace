@@ -1,10 +1,12 @@
 import type { McpClient } from "./mcp-client.js";
+import type { MemPalaceRepository } from "./ports/mempalace-repository.js";
 import type { SearchResult } from "./types.js";
 
 const MAX_READ_BYTES = 10 * 1024 * 1024;
 
 export interface MempalaceMemoryRuntimeOptions {
   mcp: McpClient;
+  repository: Pick<MemPalaceRepository, "searchMemory">;
   similarityThreshold: number;
   callTimeoutMs?: number;
   allowedReadRoots?: string[];
@@ -149,8 +151,7 @@ export class MempalaceMemoryRuntime {
   }
 
   private async buildManagerAsync(purpose?: "default" | "status"): Promise<MempalaceSearchManager> {
-    const { mcp, similarityThreshold, allowedReadRoots } = this.opts;
-    const timeoutMs = this.timeoutMs;
+    const { mcp, repository, similarityThreshold, allowedReadRoots } = this.opts;
 
     // Resolve each allowed root to its real path (resolving symlinks) once at setup time.
     // If a root doesn't exist yet, keep the normalised absolute path.
@@ -173,13 +174,9 @@ export class MempalaceMemoryRuntime {
     return {
       async search(query, opts) {
         const limit = opts?.maxResults ?? 5;
-        const raw = await mcp.callTool<{ results?: SearchResult[] }>(
-          "mempalace_search",
-          { query, limit },
-          timeoutMs,
-        );
+        const results = await repository.searchMemory({ query, limit });
         const threshold = opts?.minScore ?? similarityThreshold;
-        return (raw.results ?? [])
+        return results
           .filter((r) => r.similarity >= threshold)
           .map(mapMempalaceResult);
       },

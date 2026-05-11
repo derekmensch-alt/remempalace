@@ -1,12 +1,12 @@
 import { MemoryCache, hashKey } from "./cache.js";
-import type { McpClient } from "./mcp-client.js";
+import type { MemPalaceRepository } from "./ports/mempalace-repository.js";
 import type { SearchResult, KgFact } from "./types.js";
 import { dedupeWithKey } from "./dedup.js";
 import { extractEntityCandidates } from "./entity-extractor.js";
 import type { Metrics } from "./metrics.js";
 
 export interface MemoryRouterOptions {
-  mcp: McpClient;
+  repository: Pick<MemPalaceRepository, "searchMemory" | "queryKgEntity">;
   searchCache: MemoryCache<SearchResult[]>;
   kgCache: MemoryCache<unknown>;
   similarityThreshold: number;
@@ -70,12 +70,8 @@ export class MemoryRouter {
       return cached;
     }
     this.metrics?.inc("recall.search.cache_misses");
-    const raw = await this.opts.mcp.callTool<{ results: SearchResult[] }>(
-      "mempalace_search",
-      { query: mcpQuery, limit },
-      this.timeoutMs,
-    );
-    const filtered = (raw.results ?? []).filter(
+    const results = await this.opts.repository.searchMemory({ query: mcpQuery, limit });
+    const filtered = results.filter(
       (r) => r.similarity >= this.opts.similarityThreshold,
     );
     if (filtered.length === 0) this.metrics?.inc("recall.search.empty_results");
@@ -92,11 +88,8 @@ export class MemoryRouter {
       return cached;
     }
     this.metrics?.inc("recall.kg.cache_misses");
-    const raw = await this.opts.mcp.callTool<unknown>(
-      "mempalace_kg_query",
-      { entity },
-      this.timeoutMs,
-    );
+    void this.timeoutMs;
+    const raw = await this.opts.repository.queryKgEntity({ entity });
     if (normalizeKgResult(raw).length === 0) this.metrics?.inc("recall.kg.empty_results");
     this.opts.kgCache.set(key, raw);
     return raw;

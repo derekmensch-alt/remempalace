@@ -103,16 +103,15 @@ describe("DiaryReconciler.replay", () => {
       { content: "a", ts: "2026-04-22T01:00:00Z" },
       { content: "b", ts: "2026-04-22T02:00:00Z" },
     ]);
-    const callTool = vi.fn().mockResolvedValue({});
+    const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
     });
     const result = await r.replay();
-    expect(callTool).toHaveBeenCalledTimes(2);
-    expect(callTool).toHaveBeenCalledWith(
-      "mempalace_diary_write",
-      expect.objectContaining({ agent_name: "remempalace", entry: "a", topic: "session" }),
+    expect(writeDiary).toHaveBeenCalledTimes(2);
+    expect(writeDiary).toHaveBeenCalledWith(
+      expect.objectContaining({ agentName: "remempalace", entry: "a", topic: "session" }),
     );
     expect(result.attempted).toBe(2);
     expect(result.succeeded).toBe(2);
@@ -124,10 +123,10 @@ describe("DiaryReconciler.replay", () => {
       { content: "a", ts: "2026-04-22T01:00:00Z" },
       { content: "b", ts: "2026-04-22T02:00:00Z" },
     ]);
-    const callTool = vi.fn().mockResolvedValue({});
+    const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
     });
     await r.replay();
     const sidecar = await readFile(join(dir, "2026-04-22.replayed"), "utf8");
@@ -139,13 +138,13 @@ describe("DiaryReconciler.replay", () => {
       { content: "a", ts: "2026-04-22T01:00:00Z" },
       { content: "b", ts: "2026-04-22T02:00:00Z" },
     ]);
-    const callTool = vi
+    const writeDiary = vi
       .fn()
       .mockResolvedValueOnce({})
       .mockRejectedValueOnce(new Error("boom"));
     const r = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
     });
     const result = await r.replay();
     expect(result.succeeded).toBe(1);
@@ -154,15 +153,36 @@ describe("DiaryReconciler.replay", () => {
     expect(sidecar.trim()).toBe("0");
   });
 
-  it("noop when mcp.hasDiaryWrite is false", async () => {
+  it("freshly verifies persistence before replaying when a probe is available", async () => {
     await writeJsonl(join(dir, "2026-04-22.jsonl"), [{ content: "a", ts: "2026-04-22T01:00:00Z" }]);
-    const callTool = vi.fn();
+    const writeDiary = vi.fn();
+    const verifyDiaryPersistence = vi.fn().mockResolvedValue({
+      state: "write-ok-unverified",
+      verified: false,
+      error: "probe read miss",
+    });
     const r = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: false, callTool },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence },
+    });
+
+    const result = await r.replay();
+
+    expect(verifyDiaryPersistence).toHaveBeenCalledOnce();
+    expect(writeDiary).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ attempted: 0, succeeded: 0, failed: 0, skipped: true });
+    expect(r.lastReplayError).toBe("probe read miss");
+  });
+
+  it("noop when repository canPersistDiary is false", async () => {
+    await writeJsonl(join(dir, "2026-04-22.jsonl"), [{ content: "a", ts: "2026-04-22T01:00:00Z" }]);
+    const writeDiary = vi.fn();
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      repository: { canPersistDiary: false, writeDiary },
     });
     const result = await r.replay();
-    expect(callTool).not.toHaveBeenCalled();
+    expect(writeDiary).not.toHaveBeenCalled();
     expect(result.attempted).toBe(0);
     expect(result.skipped).toBe(true);
   });
@@ -180,14 +200,14 @@ describe("DiaryReconciler.replay", () => {
       { content: "a", ts: "2026-04-22T01:00:00Z" },
       { content: "b", ts: "2026-04-22T02:00:00Z" },
     ]);
-    const callTool = vi
+    const writeDiary = vi
       .fn()
       .mockResolvedValueOnce({})
       .mockRejectedValueOnce(new Error("x"));
     const metrics = new Metrics();
     const r = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
       metrics,
     });
     await r.replay();
@@ -202,29 +222,29 @@ describe("DiaryReconciler.replay", () => {
       { content: "a", ts: "2026-04-22T01:00:00Z" },
       { content: "b", ts: "2026-04-22T02:00:00Z" },
     ]);
-    const callTool = vi.fn().mockResolvedValue({});
+    const writeDiary = vi.fn().mockResolvedValue({});
     const r1 = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
     });
     await r1.replay();
-    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(writeDiary).toHaveBeenCalledTimes(2);
 
     const r2 = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
     });
     const result2 = await r2.replay();
-    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(writeDiary).toHaveBeenCalledTimes(2);
     expect(result2.attempted).toBe(0);
   });
 
   it("captures lastReplayResult after run", async () => {
     await writeJsonl(join(dir, "2026-04-22.jsonl"), [{ content: "a", ts: "2026-04-22T01:00:00Z" }]);
-    const callTool = vi.fn().mockResolvedValue({});
+    const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
     });
     expect(r.lastReplayResult).toBeNull();
     await r.replay();
@@ -235,10 +255,10 @@ describe("DiaryReconciler.replay", () => {
 
   it("captures lastReplayError when a write fails", async () => {
     await writeJsonl(join(dir, "2026-04-22.jsonl"), [{ content: "a", ts: "2026-04-22T01:00:00Z" }]);
-    const callTool = vi.fn().mockRejectedValue(new Error("network timeout"));
+    const writeDiary = vi.fn().mockRejectedValue(new Error("network timeout"));
     const r = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
     });
     expect(r.lastReplayError).toBeNull();
     await r.replay();
@@ -247,19 +267,19 @@ describe("DiaryReconciler.replay", () => {
 
   it("throttles replay when called within minIntervalMs", async () => {
     await writeJsonl(join(dir, "2026-04-22.jsonl"), [{ content: "a", ts: "2026-04-22T01:00:00Z" }]);
-    const callTool = vi.fn().mockResolvedValue({});
+    const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
       minIntervalMs: 60_000,
     });
     const r1 = await r.replay();
-    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(writeDiary).toHaveBeenCalledTimes(1);
     expect(r1.attempted).toBe(1);
 
     // Second call within throttle window — should be skipped
     const r2 = await r.replay();
-    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(writeDiary).toHaveBeenCalledTimes(1);
     expect(r2.skipped).toBe(true);
     expect(r2.attempted).toBe(0);
   });
@@ -276,35 +296,41 @@ describe("DiaryReconciler.replay", () => {
     await import("node:fs/promises").then(({ writeFile }) =>
       writeFile(join(dir, "2026-04-22.jsonl"), entry + "\n" + entry + "\n"),
     );
-    const callTool = vi.fn().mockResolvedValue({});
+    const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      mcp: { hasDiaryWrite: true, callTool },
+      repository: { canPersistDiary: true, writeDiary },
     });
     await r.replay();
     // Only one of the two duplicate entries should be sent
-    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(writeDiary).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("computeDiaryHealth", () => {
-  it("returns 'mcp-healthy' when MCP write works and no pending", () => {
-    expect(computeDiaryHealth({ hasDiaryWrite: true, pending: 0 })).toBe("mcp-healthy");
+  it("returns 'persistent' when diary persistence is verified and no pending fallback entries exist", () => {
+    expect(computeDiaryHealth({ persistenceState: "persistent", pending: 0 })).toBe("persistent");
   });
 
-  it("returns 'jsonl-only' when MCP unavailable", () => {
-    expect(computeDiaryHealth({ hasDiaryWrite: false, pending: 5 })).toBe("jsonl-only");
-    expect(computeDiaryHealth({ hasDiaryWrite: false, pending: 0 })).toBe("jsonl-only");
+  it("returns the capability state when persistence is not verified and no pending fallback entries exist", () => {
+    expect(computeDiaryHealth({ persistenceState: "unavailable", pending: 0 })).toBe("unavailable");
+    expect(computeDiaryHealth({ persistenceState: "tool-present", pending: 0 })).toBe("tool-present");
+    expect(computeDiaryHealth({ persistenceState: "write-ok-unverified", pending: 0 })).toBe(
+      "write-ok-unverified",
+    );
   });
 
-  it("returns 'split-brain' when MCP healthy but JSONL has unreplayed entries", () => {
-    expect(computeDiaryHealth({ hasDiaryWrite: true, pending: 5 })).toBe("split-brain");
+  it("returns 'fallback-active' when JSONL has unreplayed entries", () => {
+    expect(computeDiaryHealth({ persistenceState: "persistent", pending: 5 })).toBe("fallback-active");
+    expect(computeDiaryHealth({ persistenceState: "write-ok-unverified", pending: 5 })).toBe(
+      "fallback-active",
+    );
   });
 
   it("returns 'degraded' when last replay attempt had failures", () => {
     expect(
       computeDiaryHealth({
-        hasDiaryWrite: true,
+        persistenceState: "persistent",
         pending: 5,
         lastReplay: { attempted: 5, succeeded: 0, failed: 5, at: Date.now() },
       }),

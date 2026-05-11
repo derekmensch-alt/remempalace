@@ -1,6 +1,7 @@
 import { readdir, readFile, appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Metrics } from "./metrics.js";
+import type { DiaryPersistenceState, MemPalaceRepository } from "./ports/mempalace-repository.js";
 
 export interface DiaryEntry {
   wing: string;
@@ -25,14 +26,10 @@ export interface ReplayResult {
   at: number;
 }
 
-interface McpLike {
-  hasDiaryWrite: boolean;
-  callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
-}
-
 export interface DiaryReconcilerOptions {
   diaryDir: string;
-  mcp?: McpLike;
+  repository?: Pick<MemPalaceRepository, "canPersistDiary" | "writeDiary"> &
+    Partial<Pick<MemPalaceRepository, "verifyDiaryPersistence">>;
   metrics?: Metrics;
   /** Minimum ms between replay attempts. Defaults to 0 (no throttle). */
   minIntervalMs?: number;
@@ -109,11 +106,21 @@ export class DiaryReconciler {
 
   async replay(): Promise<ReplayResult> {
     const at = Date.now();
-    const mcp = this.opts.mcp;
-    if (!mcp || !mcp.hasDiaryWrite) {
+    const repository = this.opts.repository;
+    if (!repository || !repository.canPersistDiary) {
       const result: ReplayResult = { attempted: 0, succeeded: 0, failed: 0, skipped: true, at };
       this.lastReplayResult = result;
       return result;
+    }
+
+    if (repository.verifyDiaryPersistence) {
+      const probe = await repository.verifyDiaryPersistence();
+      if (!probe.verified || !repository.canPersistDiary) {
+        this.lastReplayError = probe.error ?? `diary persistence probe did not verify (${probe.state})`;
+        const result: ReplayResult = { attempted: 0, succeeded: 0, failed: 0, skipped: true, at };
+        this.lastReplayResult = result;
+        return result;
+      }
     }
 
     const minInterval = this.opts.minIntervalMs ?? 0;
@@ -151,10 +158,11 @@ export class DiaryReconciler {
       }
       this.opts.metrics?.inc("diary.replay.attempted");
       try {
-        await mcp.callTool("mempalace_diary_write", {
-          agent_name: p.entry.wing ?? "remempalace",
+        await repository.writeDiary({
+          agentName: p.entry.wing ?? "remempalace",
           entry: p.entry.content,
           topic: p.entry.room ?? "session",
+          timeoutMs: 500,
         });
         succeeded++;
         this.opts.metrics?.inc("diary.replay.succeeded");
@@ -189,17 +197,17 @@ export class DiaryReconciler {
   }
 }
 
-export type DiaryHealthState = "mcp-healthy" | "jsonl-only" | "split-brain" | "degraded";
+export type DiaryHealthState = DiaryPersistenceState | "fallback-active" | "degraded";
 
 export interface DiaryHealthInput {
-  hasDiaryWrite: boolean;
+  persistenceState: DiaryPersistenceState;
   pending: number;
   lastReplay?: ReplayResult | null;
 }
 
 export function computeDiaryHealth(input: DiaryHealthInput): DiaryHealthState {
-  if (!input.hasDiaryWrite) return "jsonl-only";
+  if (input.persistenceState !== "persistent") return input.pending > 0 ? "fallback-active" : input.persistenceState;
   if (input.lastReplay && input.lastReplay.failed > 0) return "degraded";
-  if (input.pending > 0) return "split-brain";
-  return "mcp-healthy";
+  if (input.pending > 0) return "fallback-active";
+  return "persistent";
 }

@@ -6,7 +6,7 @@
  *   - mcp.start() IS called on the first session_start / before_prompt_build event
  *   - Concurrent first-events coalesce to a single mcp.start() call
  *   - heartbeat.start() is deferred until after MCP probe succeeds
- *   - Diary replay fires only when hasDiaryWrite is true and replayOnStart is true
+ *   - Diary replay fires only when diary persistence is verified and replayOnStart is true
  *   - A failed mcp.start() resets the cached promise so the next event retries
  */
 
@@ -25,7 +25,7 @@ interface FakeApi {
   registerMemoryCapability: ReturnType<typeof vi.fn>;
   registerCommand: ReturnType<typeof vi.fn>;
   /** Trigger a registered event by name. */
-  emit: (name: string, event?: unknown, ctx?: unknown) => Promise<void>;
+  emit: (name: string, event?: unknown, ctx?: unknown) => Promise<unknown>;
 }
 
 function makeFakeApi(): FakeApi {
@@ -39,7 +39,8 @@ function makeFakeApi(): FakeApi {
     registerCommand: vi.fn(),
     async emit(name, event = {}, ctx = {}) {
       const h = handlers.get(name);
-      if (h) await h(event, ctx);
+      if (h) return await h(event, ctx);
+      return undefined;
     },
   };
   return api;
@@ -230,6 +231,178 @@ describe("lazy-start: first before_prompt_build triggers mcp.start()", () => {
   });
 });
 
+describe("recall gating: low-semantic prompts", () => {
+  it("skips KG/search recall for low-semantic acknowledgements", async () => {
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    const result = await api.emit(
+      "before_prompt_build",
+      { prompt: "thank you!", messages: [] },
+      { sessionKey: "skip-ack" },
+    );
+
+    expect(result).toBeUndefined();
+    expect(mockMcp.callTool).not.toHaveBeenCalledWith(
+      "mempalace_search",
+      expect.anything(),
+    );
+    expect(mockMcp.callTool).not.toHaveBeenCalledWith(
+      "mempalace_kg_query",
+      expect.anything(),
+    );
+  });
+
+  it("keeps full recall for project and question prompts", async () => {
+    mockMcp.callTool.mockImplementation((name: string) => {
+      if (name === "mempalace_search") return Promise.resolve({ results: [] });
+      if (name === "mempalace_kg_query") return Promise.resolve({ facts: [] });
+      return Promise.resolve({});
+    });
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    await api.emit(
+      "before_prompt_build",
+      { prompt: "what should I do next on remempalace?", messages: [] },
+      { sessionKey: "recall-question" },
+    );
+
+    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_search", {
+      query: "what should I do next on remempalace?",
+      limit: 5,
+    });
+    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_kg_query", {
+      entity: "remempalace",
+    });
+  });
+
+  it("uses cheap recall without KG/search for ordinary non-specific prompts", async () => {
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    const result = await api.emit(
+      "before_prompt_build",
+      { prompt: "please proceed with the next edit", messages: [] },
+      { sessionKey: "cheap-ordinary" },
+    );
+
+    expect(result).toEqual({
+      prependSystemContext: expect.stringContaining("Active Memory Plugin (remempalace)"),
+    });
+    expect(mockMcp.callTool).not.toHaveBeenCalledWith(
+      "mempalace_search",
+      expect.anything(),
+    );
+    expect(mockMcp.callTool).not.toHaveBeenCalledWith(
+      "mempalace_kg_query",
+      expect.anything(),
+    );
+  });
+
+  it("injects cheap diary-prefetch context without prompt-path KG/search", async () => {
+    mockMcp.hasDiaryRead = true;
+    mockMcp.callTool.mockImplementation((name: string) => {
+      if (name === "mempalace_diary_read") {
+        return Promise.resolve({
+          entries: [
+            { content: "worked on the diary health persistence refactor" },
+            { content: "unrelated grocery note" },
+          ],
+        });
+      }
+      if (name === "mempalace_search") return Promise.resolve({ results: [] });
+      return Promise.resolve({});
+    });
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    await api.emit("session_start", {}, { sessionKey: "cheap-prefetch" });
+    mockMcp.callTool.mockClear();
+
+    const result = await api.emit(
+      "before_prompt_build",
+      { prompt: "continue diary health refactor", messages: [] },
+      { sessionKey: "cheap-prefetch" },
+    );
+
+    expect(result).toEqual({
+      prependSystemContext: expect.stringContaining(
+        "RECENT DIARY (source=remempalace diary prefetch, cheap tier):",
+      ),
+    });
+    expect((result as { prependSystemContext: string }).prependSystemContext)
+      .toMatchInlineSnapshot(`
+        "## Active Memory Plugin (remempalace)
+
+        runtime slot: OpenClaw memory plugin = remempalace
+        scope: remempalace recall is separate from workspace files or local markdown notes
+        audit: use /remempalace status to see the most recent recall candidates and counts
+
+        ## Memory Context (remempalace)
+
+        RECENT DIARY (source=remempalace diary prefetch, cheap tier):
+        - worked on the diary health persistence refactor
+        "
+      `);
+    expect(mockMcp.callTool).not.toHaveBeenCalledWith(
+      "mempalace_search",
+      expect.anything(),
+    );
+    expect(mockMcp.callTool).not.toHaveBeenCalledWith(
+      "mempalace_kg_query",
+      expect.anything(),
+    );
+  });
+
+  it("reuses full recall precomputed from llm_input", async () => {
+    mockMcp.callTool.mockImplementation((name: string) => {
+      if (name === "mempalace_search") {
+        return Promise.resolve({
+          results: [{ text: "remempalace status note", wing: "w", room: "r", similarity: 0.9 }],
+        });
+      }
+      if (name === "mempalace_kg_query") {
+        return Promise.resolve({
+          facts: [{ subject: "remempalace", predicate: "status", object: "Phase 3" }],
+        });
+      }
+      return Promise.resolve({});
+    });
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+    const prompt = "what should I do next on remempalace?";
+
+    await api.emit(
+      "llm_input",
+      { historyMessages: [{ role: "user", content: prompt }] },
+      { sessionKey: "precompute-full" },
+    );
+    const result = await api.emit(
+      "before_prompt_build",
+      { prompt, messages: [{ role: "user", content: prompt }] },
+      { sessionKey: "precompute-full" },
+    );
+
+    expect(result).toEqual({
+      prependSystemContext: expect.stringContaining("Memory Context (remempalace)"),
+    });
+    expect(mockMcp.callTool).toHaveBeenCalledTimes(2);
+    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_search", {
+      query: prompt,
+      limit: 5,
+    });
+    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_kg_query", {
+      entity: "remempalace",
+    });
+  });
+});
+
 describe("lazy-start: heartbeat is only started after MCP is ready", () => {
   it("does not start heartbeat before any event fires", async () => {
     const plugin = await importPlugin();
@@ -253,7 +426,7 @@ describe("lazy-start: heartbeat is only started after MCP is ready", () => {
 });
 
 describe("lazy-start: diary replay gating", () => {
-  it("does not call replay when hasDiaryWrite is false", async () => {
+  it("does not call replay when diary persistence is unverified", async () => {
     mockMcp.hasDiaryWrite = false;
     const replaySpy = vi.fn().mockResolvedValue({ attempted: 0, succeeded: 0, failed: 0, at: 0 });
 
@@ -272,11 +445,24 @@ describe("lazy-start: diary replay gating", () => {
     expect(replaySpy).not.toHaveBeenCalled();
   });
 
-  it("calls replay when hasDiaryWrite is true", async () => {
+  it("calls replay when diary persistence is verified", async () => {
     mockMcp.hasDiaryWrite = true;
-    // probeCapabilities sets hasDiaryWrite — simulate it by mutating after probe
+    mockMcp.hasDiaryRead = true;
+    let probeEntry = "";
+    mockMcp.callTool.mockImplementation((name: string, args: Record<string, unknown>) => {
+      if (name === "mempalace_diary_write") {
+        probeEntry = String(args.entry);
+        return Promise.resolve({ success: true });
+      }
+      if (name === "mempalace_diary_read") {
+        return Promise.resolve({ entries: [{ content: probeEntry, topic: "health-probe" }] });
+      }
+      return Promise.resolve({});
+    });
+    // probeCapabilities sets diary tool presence — simulate it by mutating after probe
     mockMcp.probeCapabilities.mockImplementation(async () => {
       mockMcp.hasDiaryWrite = true;
+      mockMcp.hasDiaryRead = true;
     });
 
     const replaySpy = vi.fn().mockResolvedValue({ attempted: 1, succeeded: 1, failed: 0, at: 0 });
@@ -376,7 +562,7 @@ describe("injection deduplication: builder is no-op when hook fired", () => {
     const sessionKey = "session-dedup-test";
 
     // Fire before_prompt_build (the modern hook path)
-    await api.emit(
+    const hookResult = await api.emit(
       "before_prompt_build",
       { prompt: "what do you remember about my projects?", messages: [] },
       { sessionKey },
@@ -384,6 +570,9 @@ describe("injection deduplication: builder is no-op when hook fired", () => {
 
     // Verify a builder was registered
     expect(capturedBuilder).not.toBeNull();
+    expect(hookResult).toEqual({
+      prependSystemContext: expect.stringContaining("Active Memory Plugin (remempalace)"),
+    });
 
     // Now simulate OpenClaw also calling the builder (legacy-compat path)
     const result = capturedBuilder!({ sessionKey });
@@ -481,15 +670,11 @@ describe("injection deduplication: builder is no-op when hook fired", () => {
     expect(capturedBuilder).not.toBeNull();
 
     // Before any hook fires (api.on never called), hookFiredSessions is empty.
-    // cachedBySession also has no entry -> builder returns the diary-fallback note
-    // (hasDiaryWrite is false on the mock) — a non-empty array, NOT [].
-    // The important invariant: the builder does NOT return [] due to the hook flag.
+    // cachedBySession also has no entry. Health/fallback state belongs in
+    // status/logs, not prompt notes, so the normal path returns no prompt lines.
     const sessionKey = "legacy-session";
     const result = capturedBuilder!({ sessionKey });
 
-    // With hasDiaryWrite=false and empty cachedBySession the builder appends the
-    // diary-fallback note, so the result is non-empty.
-    expect(result.length).toBeGreaterThan(0);
-    expect(result.some((line) => line.includes("diary"))).toBe(true);
+    expect(result).toEqual([]);
   });
 });

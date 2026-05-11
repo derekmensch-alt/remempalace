@@ -1,8 +1,10 @@
 import type { CacheStats } from "./cache.js";
 import type { DiaryHealthState, ReplayResult } from "./diary-replay.js";
+import type { DiaryPersistenceState } from "./ports/mempalace-repository.js";
 
 export interface DiaryStatus {
   state: DiaryHealthState;
+  persistenceState?: DiaryPersistenceState;
   pending: number;
   lastReplay?: ReplayResult | null;
   lastReplayError?: string | null;
@@ -21,9 +23,9 @@ export interface LastRecallStatus {
 
 export interface StatusReportInput {
   mcpReady: boolean;
-  hasDiaryWrite: boolean;
-  hasDiaryRead: boolean;
-  hasKgInvalidate: boolean;
+  canWriteDiary: boolean;
+  canReadDiary: boolean;
+  canInvalidateKg: boolean;
   searchCache: CacheStats;
   kgCache: CacheStats;
   metrics?: Record<string, number>;
@@ -46,9 +48,9 @@ export function buildStatusReport(input: StatusReportInput): string {
 
   lines.push("");
   lines.push("Capabilities:");
-  lines.push(`  diary_write: ${input.hasDiaryWrite ? "ok" : "missing (falling back to local JSONL)"}`);
-  lines.push(`  diary_read:  ${input.hasDiaryRead ? "ok" : "missing"}`);
-  lines.push(`  kg_invalidate: ${input.hasKgInvalidate ? "ok" : "missing (conflict invalidation disabled)"}`);
+  lines.push(`  diary_write: ${input.canWriteDiary ? "ok" : "missing (falling back to local JSONL)"}`);
+  lines.push(`  diary_read:  ${input.canReadDiary ? "ok" : "missing"}`);
+  lines.push(`  kg_invalidate: ${input.canInvalidateKg ? "ok" : "missing (conflict invalidation disabled)"}`);
 
   lines.push("");
   lines.push("Caches:");
@@ -59,6 +61,9 @@ export function buildStatusReport(input: StatusReportInput): string {
     lines.push("");
     lines.push("Diary:");
     lines.push(`  state: ${input.diary.state}`);
+    lines.push(
+      `  persistence: ${input.diary.persistenceState === "persistent" ? "verified" : "unverified"}`,
+    );
     lines.push(`  pending: ${input.diary.pending}`);
     const lr = input.diary.lastReplay;
     if (lr) {

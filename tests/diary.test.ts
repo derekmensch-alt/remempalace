@@ -96,7 +96,8 @@ describe("summarizeSession", () => {
 describe("writeDiaryAsync", () => {
   it("is fire-and-forget (does not await)", () => {
     const mockMcp = {
-      callTool: vi.fn().mockImplementation(
+      canPersistDiary: true,
+      writeDiary: vi.fn().mockImplementation(
         () => new Promise((r) => setTimeout(r, 1000)),
       ),
     };
@@ -108,17 +109,18 @@ describe("writeDiaryAsync", () => {
 
   it("swallows errors silently", async () => {
     const mockMcp = {
-      callTool: vi.fn().mockRejectedValue(new Error("boom")),
+      canPersistDiary: true,
+      writeDiary: vi.fn().mockRejectedValue(new Error("boom")),
     };
     expect(() => writeDiaryAsync(mockMcp as any, "summary")).not.toThrow();
     await new Promise((r) => setTimeout(r, 10));
   });
 
-  it("records diary.write.attempted + mcp_succeeded when mcp write resolves", async () => {
+  it("records diary.write.attempted + mcp_succeeded when verified mcp write resolves", async () => {
     const metrics = new Metrics();
     const mockMcp = {
-      hasDiaryWrite: true,
-      callTool: vi.fn().mockResolvedValue({}),
+      canPersistDiary: true,
+      writeDiary: vi.fn().mockResolvedValue({}),
     };
     writeDiaryAsync(mockMcp as any, "summary", metrics);
     await new Promise((r) => setTimeout(r, 10));
@@ -132,8 +134,8 @@ describe("writeDiaryAsync", () => {
   it("records diary.write.mcp_failed when mcp write rejects", async () => {
     const metrics = new Metrics();
     const mockMcp = {
-      hasDiaryWrite: true,
-      callTool: vi.fn().mockRejectedValue(new Error("boom")),
+      canPersistDiary: true,
+      writeDiary: vi.fn().mockRejectedValue(new Error("boom")),
     };
     writeDiaryAsync(mockMcp as any, "summary", metrics);
     await new Promise((r) => setTimeout(r, 10));
@@ -145,8 +147,8 @@ describe("writeDiaryAsync", () => {
   it("falls back to JSONL when mcp write rejects (transient failure recovery)", async () => {
     const metrics = new Metrics();
     const mockMcp = {
-      hasDiaryWrite: true,
-      callTool: vi.fn().mockRejectedValue(new Error("boom")),
+      canPersistDiary: true,
+      writeDiary: vi.fn().mockRejectedValue(new Error("boom")),
     };
     writeDiaryAsync(mockMcp as any, "summary", metrics);
     await new Promise((r) => setTimeout(r, 20));
@@ -155,17 +157,18 @@ describe("writeDiaryAsync", () => {
     expect(snap["diary.write.fallback"]).toBe(1);
   });
 
-  it("records diary.write.fallback when hasDiaryWrite is false", async () => {
+  it("records diary.write.fallback when canPersistDiary is false", async () => {
     const metrics = new Metrics();
     const mockMcp = {
-      hasDiaryWrite: false,
-      callTool: vi.fn(),
+      canPersistDiary: false,
+      writeDiary: vi.fn(),
     };
     writeDiaryAsync(mockMcp as any, "summary", metrics);
     await new Promise((r) => setTimeout(r, 10));
     const snap = metrics.snapshot();
     expect(snap["diary.write.attempted"]).toBe(1);
+    expect(snap["diary.write.persistence_unverified"]).toBe(1);
     expect(snap["diary.write.fallback"]).toBe(1);
-    expect(mockMcp.callTool).not.toHaveBeenCalled();
+    expect(mockMcp.writeDiary).not.toHaveBeenCalled();
   });
 });

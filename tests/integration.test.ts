@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { McpClient } from "../src/mcp-client.js";
+import { McpMemPalaceRepository } from "../src/adapters/mcp-mempalace-repository.js";
 import { MemoryRouter } from "../src/router.js";
 import { MemoryCache } from "../src/cache.js";
 import type { SearchResult } from "../src/types.js";
@@ -15,10 +16,12 @@ const maybe = hasMempalace ? describe : describe.skip;
 
 maybe("integration: real MemPalace MCP", () => {
   let mcp: McpClient;
+  let repository: McpMemPalaceRepository;
 
   beforeAll(async () => {
     mcp = new McpClient({ pythonBin: PY as string });
     await mcp.start();
+    repository = new McpMemPalaceRepository(mcp);
   }, 30000);
 
   afterAll(async () => {
@@ -27,7 +30,7 @@ maybe("integration: real MemPalace MCP", () => {
 
   it("completes a search round-trip", async () => {
     const router = new MemoryRouter({
-      mcp,
+      repository,
       searchCache: new MemoryCache<SearchResult[]>({ capacity: 10, ttlMs: 1000 }),
       kgCache: new MemoryCache<unknown>({ capacity: 10, ttlMs: 1000 }),
       similarityThreshold: 0,
@@ -38,7 +41,7 @@ maybe("integration: real MemPalace MCP", () => {
 
   it("second identical search is cache hit (sub-5ms)", async () => {
     const router = new MemoryRouter({
-      mcp,
+      repository,
       searchCache: new MemoryCache<SearchResult[]>({ capacity: 10, ttlMs: 10000 }),
       kgCache: new MemoryCache<unknown>({ capacity: 10, ttlMs: 10000 }),
       similarityThreshold: 0,

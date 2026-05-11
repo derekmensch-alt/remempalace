@@ -15,13 +15,13 @@ async function debugLog(label: string, data: unknown): Promise<void> {
 }
 import { MemoryCache } from "./cache.js";
 import { McpClient } from "./mcp-client.js";
-import { MemoryRouter } from "./router.js";
+import { MemoryRouter, type ReadBundle } from "./router.js";
 import type { SearchResult, RemempalaceConfig } from "./types.js";
 import { BudgetManager } from "./budget.js";
 import { buildTieredInjection } from "./tiers.js";
 import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
-import { summarizeSession, writeDiaryAsync } from "./diary.js";
+import { summarizeSession } from "./diary.js";
 import { KgBatcher } from "./kg.js";
 import { extractStructuredFacts, extractMemoryCommands } from "./structured-extractor.js";
 import { prefetchWakeUp } from "./prefetch.js";
@@ -32,7 +32,14 @@ import { isTimelineQuery, queryTimeline } from "./timeline.js";
 import { MempalaceMemoryRuntime } from "./memory-runtime.js";
 import { buildStatusReport, type LastRecallStatus } from "./status-command.js";
 import { Metrics } from "./metrics.js";
-import { DiaryReconciler, computeDiaryHealth } from "./diary-replay.js";
+import { DiaryReconciler } from "./diary-replay.js";
+import { McpMemPalaceRepository } from "./adapters/mcp-mempalace-repository.js";
+import { DiaryService } from "./services/diary-service.js";
+import {
+  buildDefaultRuntimeDisclosure,
+  PromptInjectionService,
+} from "./services/prompt-injection-service.js";
+import { RecallService } from "./services/recall-service.js";
 
 interface SessionMessage {
   role?: string;
@@ -91,6 +98,12 @@ interface HookContext {
   sessionKey?: string;
 }
 
+interface PrecomputedRecall {
+  prompt: string;
+  candidates: string[];
+  promise: Promise<ReadBundle>;
+}
+
 export type KgFactSourceRole = "user" | "assistant" | "system";
 
 export function kgConfidenceThresholdForSource(
@@ -136,6 +149,16 @@ function resolvePrompt(ev: PromptBuildEvent): string {
   return "";
 }
 
+function latestUserPrompt(messages: SessionMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role !== "user") continue;
+    const clean = stripRuntimeInjectionBlocks(extractText(message));
+    if (clean.length >= 5) return clean;
+  }
+  return "";
+}
+
 function normalizeKgResult(raw: unknown): KgFact[] {
   if (!raw || typeof raw !== "object") return [];
   if (Array.isArray(raw)) return raw as KgFact[];
@@ -153,14 +176,7 @@ export function stripRuntimeInjectionBlocks(text: string): string {
 }
 
 export function buildRuntimeDisclosure(): string[] {
-  return [
-    "## Active Memory Plugin (remempalace)",
-    "",
-    "runtime slot: OpenClaw memory plugin = remempalace",
-    "scope: remempalace recall is separate from workspace files or local markdown notes",
-    "audit: use /remempalace status to see the most recent recall candidates and counts",
-    "",
-  ];
+  return buildDefaultRuntimeDisclosure();
 }
 
 const plugin = {
@@ -183,18 +199,26 @@ const plugin = {
       capacity: cfg.cache.capacity,
       ttlMs: cfg.cache.kgTtlMs,
     });
+    const mempalaceRepository = new McpMemPalaceRepository(mcp);
     const router = new MemoryRouter({
-      mcp,
+      repository: mempalaceRepository,
       searchCache,
       kgCache,
       similarityThreshold: cfg.injection.similarityThreshold,
       knownEntities: cfg.injection.knownEntities,
       metrics,
     });
+    const diaryService = new DiaryService({
+      repository: mempalaceRepository,
+      metrics,
+      localDir: cfg.diary.localDir,
+    });
+    const promptInjectionService = new PromptInjectionService();
+    const recallService = new RecallService(router);
 
     const diaryReconciler = new DiaryReconciler({
       diaryDir: cfg.diary.localDir,
-      mcp,
+      repository: mempalaceRepository,
       metrics,
       minIntervalMs: 5 * 60 * 1000,
     });
@@ -203,7 +227,7 @@ const plugin = {
     const heartbeat = new HeartbeatWarmer({
       intervalMs: 30 * 60 * 1000,
       warm: async () => {
-        await prefetchWakeUp(mcp, { diaryCount: cfg.prefetch.diaryCount });
+        await prefetchWakeUp(mempalaceRepository, { diaryCount: cfg.prefetch.diaryCount });
       },
     });
 
@@ -220,22 +244,32 @@ const plugin = {
         .then(async () => {
           logger.info("MCP client started");
           await mcp.probeCapabilities().catch(() => {});
+          await diaryService.verifyPersistenceAndReplay({
+            replayOnStart: cfg.diary.replayOnStart,
+            reconciler: diaryReconciler,
+            onProbeError: (err) => {
+              logger.warn(`diary persistence probe failed: ${err.message}`);
+            },
+            onProbeResult: (result) => {
+              if (!result.verified) {
+                logger.warn(
+                  `diary persistence unverified: state=${result.state}${result.error ? ` error=${result.error}` : ""}`,
+                );
+              }
+            },
+            onReplayResult: (r) => {
+              if (r.attempted > 0) {
+                logger.info(
+                  `diary replay: ${r.succeeded}/${r.attempted} succeeded, ${r.failed} failed`,
+                );
+              }
+            },
+            onReplayError: (err) => {
+              logger.warn(`diary replay failed: ${err.message}`);
+            },
+          });
           // Heartbeat starts only once MCP is confirmed alive.
           heartbeat.start();
-          if (cfg.diary.replayOnStart && mcp.hasDiaryWrite) {
-            diaryReconciler
-              .replay()
-              .then((r) => {
-                if (r.attempted > 0) {
-                  logger.info(
-                    `diary replay: ${r.succeeded}/${r.attempted} succeeded, ${r.failed} failed`,
-                  );
-                }
-              })
-              .catch((err: Error) => {
-                logger.warn(`diary replay failed: ${err.message}`);
-              });
-          }
         })
         .catch((err: Error) => {
           // Allow retry on next trigger by clearing the cached promise.
@@ -256,6 +290,7 @@ const plugin = {
 
     const memoryRuntime = new MempalaceMemoryRuntime({
       mcp,
+      repository: mempalaceRepository,
       similarityThreshold: cfg.injection.similarityThreshold,
       allowedReadRoots: cfg.memoryRuntime.allowedReadRoots,
       waitUntilReady: () => initPromise,
@@ -285,6 +320,7 @@ const plugin = {
     // api.on honours before_prompt_build return values.
     const hookFiredSessions = new Set<string>();
     const sessionMessages = new Map<string, SessionMessage[]>();
+    const precomputedRecallBySession = new Map<string, PrecomputedRecall>();
     const learnedKgKeys = new Set<string>();
     let lastRecall: LastRecallStatus | null = null;
     const sessionStartCache = new Map<
@@ -299,11 +335,10 @@ const plugin = {
     });
 
     const kgBatcher = cfg.kg.autoLearn
-      ? new KgBatcher(mcp, {
+      ? new KgBatcher(mempalaceRepository, {
           batchSize: cfg.kg.batchSize,
           flushIntervalMs: cfg.kg.flushIntervalMs,
           invalidateOnConflict: cfg.kg.invalidateOnConflict,
-          getMcpCaps: () => ({ hasKgInvalidate: mcp.hasKgInvalidate }),
           metrics,
           onFactsWritten: (facts) => {
             for (const f of facts) {
@@ -358,7 +393,7 @@ const plugin = {
         const key = hctx?.sessionKey ?? "default";
         try {
           const [prefetch, identity] = await Promise.all([
-            prefetchWakeUp(mcp, { diaryCount: cfg.prefetch.diaryCount }),
+            prefetchWakeUp(mempalaceRepository, { diaryCount: cfg.prefetch.diaryCount }),
             cfg.prefetch.identityEntities
               ? loadIdentityContext({
                   soulPath: cfg.identity.soulPath,
@@ -392,6 +427,37 @@ const plugin = {
               logger.info(`memory commands — forget: ${cmds.forget.join(" | ")}`);
             }
           }
+          const prompt = latestUserPrompt(messages);
+          if (!prompt || prompt.length < 10 || isTimelineQuery(prompt) || recallService.shouldSkipRecall(prompt)) {
+            precomputedRecallBySession.delete(key);
+            return;
+          }
+          const candidates = recallService.extractCandidates(prompt);
+          const recallMode = recallService.selectRecallMode(prompt, candidates);
+          if (recallMode !== "full") {
+            precomputedRecallBySession.delete(key);
+            return;
+          }
+          const existing = precomputedRecallBySession.get(key);
+          if (
+            existing &&
+            existing.prompt === prompt &&
+            existing.candidates.join("\0") === candidates.join("\0")
+          ) {
+            return;
+          }
+          metrics.inc("recall.precompute.started");
+          const promise = initPromise.then(() =>
+            recallService.readBundle(prompt, 5, candidates, { mode: "full" }),
+          );
+          promise.catch((err: Error) => {
+            metrics.inc("recall.precompute.failed");
+            void debugLog("llm_input:recall-precompute-error", {
+              sessionKey: key,
+              error: err.message,
+            });
+          });
+          precomputedRecallBySession.set(key, { prompt, candidates, promise });
         }
       });
 
@@ -403,7 +469,7 @@ const plugin = {
           sessionMessages.delete(key);
           const summary = summarizeSession(messages, { maxTokens: cfg.diary.maxEntryTokens });
           if (!summary) return;
-          writeDiaryAsync(mcp, summary, metrics, { localDir: cfg.diary.localDir });
+          diaryService.writeSessionSummaryAsync(summary);
         });
       }
 
@@ -445,15 +511,8 @@ const plugin = {
         if (isTimelineQuery(prompt)) {
           metrics.inc("recall.timeline.calls");
           try {
-            const tl = await queryTimeline(mcp, { daysBack: 7 });
-            const lines = [
-              ...buildRuntimeDisclosure(),
-              "## Timeline Context (remempalace)",
-              "",
-              ...tl.diary.map((d) => `- ${d.date}: ${d.content.slice(0, 200)}`),
-              ...tl.events.map((e) => `- ${e.date}: ${e.fact}`),
-              "",
-            ];
+            const tl = await queryTimeline(mempalaceRepository, { daysBack: 7 });
+            const lines = promptInjectionService.buildTimelineContext(tl);
             cachedBySession.set(sessionKey, lines);
             const block = lines.join("\n");
             await debugLog("before_prompt_build:timeline-returning", {
@@ -466,6 +525,15 @@ const plugin = {
           }
         }
 
+        if (recallService.shouldSkipRecall(prompt)) {
+          metrics.inc("recall.skipped.low_semantic");
+          await debugLog("before_prompt_build:skip-low-semantic", {
+            sessionKey,
+            promptLen: prompt.length,
+          });
+          return;
+        }
+
         const contextWindow = hctx.contextWindow ?? 200000;
         const conversationTokens = ev.messages
           ? ev.messages.reduce((sum, m) => sum + countTokens(extractText(m)), 0)
@@ -473,7 +541,7 @@ const plugin = {
 
         const budget = budgetManager.compute({ conversationTokens, contextWindow });
 
-        const lines: string[] = buildRuntimeDisclosure();
+        let lines: string[] = promptInjectionService.buildRuntimeDisclosure();
 
         // Compact identity and prepend when L0 tier is allowed
         const start = sessionStartCache.get(sessionKey);
@@ -486,7 +554,7 @@ const plugin = {
             : "";
 
         try {
-          const candidates = router.extractCandidates(prompt);
+          const candidates = recallService.extractCandidates(prompt);
           if (process.env.REMEMPALACE_DEBUG === "1") {
             await debugLog("before_prompt_build:candidates", {
               sessionKey,
@@ -508,24 +576,48 @@ const plugin = {
             );
             await debugLog("before_prompt_build:per-entity-kg", { sessionKey, perEntityKg });
           }
-          const bundle = await router.readBundle(prompt, 5, { entityCandidates: candidates });
-          const kgFacts = normalizeKgResult(bundle.kgResults);
-          const injected = buildTieredInjection({
-            kgFacts,
-            searchResults: bundle.searchResults,
-            budget,
-            tiers: cfg.tiers,
-            useAaak: cfg.injection.useAaak,
-            metrics,
+          const recallMode = recallService.selectRecallMode(prompt, candidates);
+          if (recallMode === "cheap") {
+            metrics.inc("recall.cheap.calls");
+          }
+          await debugLog("before_prompt_build:recall-mode", {
+            sessionKey,
+            recallMode,
+            candidateCount: candidates.length,
           });
-
-          if (identityCompacted) {
-            lines.push("## Identity (remempalace)", "", identityCompacted, "");
+          const precomputed = precomputedRecallBySession.get(sessionKey);
+          const canUsePrecomputed =
+            recallMode === "full" &&
+            precomputed?.prompt === prompt &&
+            precomputed.candidates.join("\0") === candidates.join("\0");
+          const bundle = canUsePrecomputed
+            ? await precomputed.promise
+            : await recallService.readBundle(prompt, 5, candidates, { mode: recallMode });
+          if (canUsePrecomputed) {
+            metrics.inc("recall.precompute.used");
+            precomputedRecallBySession.delete(sessionKey);
           }
+          const kgFacts = normalizeKgResult(bundle.kgResults);
+          const injected =
+            recallMode === "cheap"
+              ? recallService.buildCheapMemoryLines({
+                  prompt,
+                  diaryEntries: start?.diaryEntries,
+                  maxDiaryEntries: 2,
+                })
+              : buildTieredInjection({
+                  kgFacts,
+                  searchResults: bundle.searchResults,
+                  budget,
+                  tiers: cfg.tiers,
+                  useAaak: cfg.injection.useAaak,
+                  metrics,
+                });
 
-          if (injected.length > 0) {
-            lines.push("## Memory Context (remempalace)", "", ...injected, "");
-          }
+          lines = promptInjectionService.buildRecallContext({
+            identity: identityCompacted,
+            memoryLines: injected,
+          });
 
           await debugLog("before_prompt_build:assembled", {
             sessionKey,
@@ -605,20 +697,13 @@ const plugin = {
       }
       const recallLines = cachedBySession.get(key) ?? [];
       cachedBySession.delete(key);
-      const out = !mcp.hasDiaryWrite
-        ? [
-            ...recallLines,
-            "## System Notes (remempalace)",
-            "",
-            "diary: falling back to local JSONL (~/.mempalace/palace/diary/) — mempalace_diary_write returned Internal tool error",
-            "",
-          ]
-        : recallLines;
+      const out = recallLines;
       void debugLog("builder:called", {
         sessionKey: key,
         paramKeys: params && typeof params === "object" ? Object.keys(params) : null,
         recallLineCount: recallLines.length,
-        hasDiaryWrite: mcp.hasDiaryWrite,
+        canWriteDiary: mempalaceRepository.canWriteDiary,
+        diaryPersistenceState: mempalaceRepository.diaryPersistenceState,
         outLineCount: out.length,
         outBlock: out.join("\n"),
       });
@@ -637,23 +722,13 @@ const plugin = {
         description: "Show remempalace memory plugin status (MCP, caches, diary fallback)",
         acceptsArgs: false,
         handler: async () => {
-          const pending = await diaryReconciler.loadPending().catch(() => []);
-          const diaryStatus = {
-            state: computeDiaryHealth({
-              hasDiaryWrite: mcp.hasDiaryWrite,
-              pending: pending.length,
-              lastReplay: diaryReconciler.lastReplayResult,
-            }),
-            pending: pending.length,
-            lastReplay: diaryReconciler.lastReplayResult,
-            lastReplayError: diaryReconciler.lastReplayError,
-          };
+          const diaryStatus = await diaryService.getStatus({ reconciler: diaryReconciler });
           return {
             text: buildStatusReport({
               mcpReady: mcp.isReady(),
-              hasDiaryWrite: mcp.hasDiaryWrite,
-              hasDiaryRead: mcp.hasDiaryRead,
-              hasKgInvalidate: mcp.hasKgInvalidate,
+              canWriteDiary: mempalaceRepository.canWriteDiary,
+              canReadDiary: mempalaceRepository.canReadDiary,
+              canInvalidateKg: mempalaceRepository.canInvalidateKg,
               searchCache: searchCache.stats(),
               kgCache: kgCache.stats(),
               metrics: metrics.snapshot(),

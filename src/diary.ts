@@ -1,6 +1,7 @@
 import { countTokens } from "./token-counter.js";
-import { appendLocalDiary } from "./diary-local.js";
 import type { Metrics } from "./metrics.js";
+import type { MemPalaceRepository } from "./ports/mempalace-repository.js";
+import { DiaryService } from "./services/diary-service.js";
 
 interface SessionMessage {
   role?: string;
@@ -118,39 +119,10 @@ export interface WriteDiaryOptions {
 }
 
 export function writeDiaryAsync(
-  mcp: { hasDiaryWrite: boolean; callTool: (name: string, args: Record<string, unknown>) => Promise<unknown> },
+  repository: Pick<MemPalaceRepository, "canPersistDiary" | "writeDiary">,
   summary: string,
   metrics?: Metrics,
   options?: WriteDiaryOptions,
 ): void {
-  metrics?.inc("diary.write.attempted");
-  const writeJsonl = () => {
-    metrics?.inc("diary.write.fallback");
-    return appendLocalDiary(
-      {
-        wing: "remempalace",
-        room: "session",
-        content: summary,
-        ts: new Date().toISOString(),
-      },
-      undefined,
-      options?.localDir,
-    ).catch(() => {});
-  };
-
-  if (mcp.hasDiaryWrite) {
-    void mcp
-      .callTool("mempalace_diary_write", {
-        agent_name: "remempalace",
-        entry: summary,
-        topic: "session",
-      })
-      .then(() => metrics?.inc("diary.write.mcp_succeeded"))
-      .catch(() => {
-        metrics?.inc("diary.write.mcp_failed");
-        return writeJsonl();
-      });
-  } else {
-    void writeJsonl();
-  }
+  new DiaryService({ repository, metrics, localDir: options?.localDir }).writeSessionSummaryAsync(summary);
 }

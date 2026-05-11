@@ -10,19 +10,20 @@ vi.mock("../src/diary-local.js", () => ({
 
 import { writeDiaryAsync } from "../src/diary.js";
 import { appendLocalDiary } from "../src/diary-local.js";
+import { DiaryService } from "../src/services/diary-service.js";
 
 describe("writeDiaryAsync fallback routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("calls appendLocalDiary when hasDiaryWrite is false", async () => {
-    const mockMcp = {
-      hasDiaryWrite: false,
-      callTool: vi.fn(),
+  it("calls appendLocalDiary when canPersistDiary is false", async () => {
+    const repository = {
+      canPersistDiary: false,
+      writeDiary: vi.fn(),
     };
 
-    writeDiaryAsync(mockMcp, "local fallback summary");
+    writeDiaryAsync(repository, "local fallback summary");
     // Allow the microtask queue to drain
     await new Promise((r) => setTimeout(r, 20));
 
@@ -32,40 +33,197 @@ describe("writeDiaryAsync fallback routing", () => {
     expect(call.room).toBe("session");
     expect(call.content).toBe("local fallback summary");
     expect(typeof call.ts).toBe("string");
-    expect(mockMcp.callTool).not.toHaveBeenCalled();
+    expect(repository.writeDiary).not.toHaveBeenCalled();
   });
 
-  it("calls mcp.callTool when hasDiaryWrite is true", async () => {
-    const mockMcp = {
-      hasDiaryWrite: true,
-      callTool: vi.fn().mockResolvedValue(undefined),
+  it("calls repository.writeDiary when canPersistDiary is true", async () => {
+    const repository = {
+      canPersistDiary: true,
+      writeDiary: vi.fn().mockResolvedValue(undefined),
     };
 
-    writeDiaryAsync(mockMcp, "remote summary");
+    writeDiaryAsync(repository, "remote summary");
     await new Promise((r) => setTimeout(r, 20));
 
-    expect(mockMcp.callTool).toHaveBeenCalledOnce();
-    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_diary_write", {
-      agent_name: "remempalace",
+    expect(repository.writeDiary).toHaveBeenCalledOnce();
+    expect(repository.writeDiary).toHaveBeenCalledWith({
+      agentName: "remempalace",
       entry: "remote summary",
       topic: "session",
+      timeoutMs: 500,
     });
     expect(appendLocalDiary).not.toHaveBeenCalled();
   });
 
   it("passes localDir from options as diaryDir to appendLocalDiary", async () => {
-    const mockMcp = {
-      hasDiaryWrite: false,
-      callTool: vi.fn(),
+    const repository = {
+      canPersistDiary: false,
+      writeDiary: vi.fn(),
     };
 
-    writeDiaryAsync(mockMcp, "summary", undefined, { localDir: "/custom/diary/path" });
+    writeDiaryAsync(repository, "summary", undefined, { localDir: "/custom/diary/path" });
     await new Promise((r) => setTimeout(r, 20));
 
     expect(appendLocalDiary).toHaveBeenCalledOnce();
     const call = (appendLocalDiary as ReturnType<typeof vi.fn>).mock.calls[0];
     // Third argument is diaryDir
     expect(call[2]).toBe("/custom/diary/path");
+  });
+});
+
+describe("DiaryService", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("uses local JSONL when persistence is not verified", async () => {
+    const repository = {
+      canPersistDiary: false,
+      writeDiary: vi.fn(),
+    };
+    const service = new DiaryService({
+      repository,
+      now: () => new Date("2026-05-11T00:00:00.000Z"),
+    });
+
+    service.writeSessionSummaryAsync("summary");
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(repository.writeDiary).not.toHaveBeenCalled();
+    expect(appendLocalDiary).toHaveBeenCalledWith(
+      {
+        wing: "remempalace",
+        room: "session",
+        content: "summary",
+        ts: "2026-05-11T00:00:00.000Z",
+      },
+      undefined,
+      undefined,
+    );
+  });
+
+  it("uses repository writes when persistence is verified", async () => {
+    const repository = {
+      canPersistDiary: true,
+      writeDiary: vi.fn().mockResolvedValue(undefined),
+    };
+    const service = new DiaryService({ repository });
+
+    service.writeSessionSummaryAsync("summary");
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(repository.writeDiary).toHaveBeenCalledWith({
+      agentName: "remempalace",
+      entry: "summary",
+      topic: "session",
+      timeoutMs: 500,
+    });
+    expect(appendLocalDiary).not.toHaveBeenCalled();
+  });
+
+  it("verifies persistence and replays fallback entries only when persistence is verified", async () => {
+    let persistent = false;
+    const repository = {
+      get canPersistDiary() {
+        return persistent;
+      },
+      writeDiary: vi.fn(),
+      verifyDiaryPersistence: vi.fn().mockImplementation(async () => {
+        persistent = true;
+        return { state: "persistent", verified: true };
+      }),
+    };
+    const replay = vi.fn().mockResolvedValue({ attempted: 1, succeeded: 1, failed: 0, at: 0 });
+    const onReplayResult = vi.fn();
+    const onProbeResult = vi.fn();
+    const service = new DiaryService({ repository });
+
+    const probe = await service.verifyPersistenceAndReplay({
+      replayOnStart: true,
+      reconciler: { replay },
+      onReplayResult,
+      onProbeResult,
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(probe).toEqual({ state: "persistent", verified: true });
+    expect(onProbeResult).toHaveBeenCalledWith({ state: "persistent", verified: true });
+    expect(replay).toHaveBeenCalledOnce();
+    expect(onReplayResult).toHaveBeenCalledWith({ attempted: 1, succeeded: 1, failed: 0, at: 0 });
+  });
+
+  it("does not replay fallback entries when persistence remains unverified", async () => {
+    const repository = {
+      canPersistDiary: false,
+      writeDiary: vi.fn(),
+      verifyDiaryPersistence: vi.fn().mockResolvedValue({
+        state: "write-ok-unverified",
+        verified: false,
+      }),
+    };
+    const replay = vi.fn();
+    const service = new DiaryService({ repository });
+
+    const probe = await service.verifyPersistenceAndReplay({
+      replayOnStart: true,
+      reconciler: { replay },
+    });
+
+    expect(probe).toEqual({ state: "write-ok-unverified", verified: false });
+    expect(replay).not.toHaveBeenCalled();
+  });
+
+  it("builds diary status from persistence state and pending fallback entries", async () => {
+    const repository = {
+      canPersistDiary: false,
+      diaryPersistenceState: "write-ok-unverified" as const,
+      writeDiary: vi.fn(),
+    };
+    const service = new DiaryService({ repository });
+
+    const status = await service.getStatus({
+      reconciler: {
+        loadPending: vi.fn().mockResolvedValue([{ lineNo: 0 }]),
+        lastReplayResult: null,
+        lastReplayError: null,
+      },
+    });
+
+    expect(status).toEqual({
+      state: "fallback-active",
+      persistenceState: "write-ok-unverified",
+      pending: 1,
+      lastReplay: null,
+      lastReplayError: null,
+    });
+  });
+
+  it("reports unverified probe results without replaying", async () => {
+    const repository = {
+      canPersistDiary: false,
+      writeDiary: vi.fn(),
+      verifyDiaryPersistence: vi.fn().mockResolvedValue({
+        state: "write-ok-unverified",
+        verified: false,
+        error: "read miss",
+      }),
+    };
+    const replay = vi.fn();
+    const onProbeResult = vi.fn();
+    const service = new DiaryService({ repository });
+
+    await service.verifyPersistenceAndReplay({
+      replayOnStart: true,
+      reconciler: { replay },
+      onProbeResult,
+    });
+
+    expect(onProbeResult).toHaveBeenCalledWith({
+      state: "write-ok-unverified",
+      verified: false,
+      error: "read miss",
+    });
+    expect(replay).not.toHaveBeenCalled();
   });
 });
 

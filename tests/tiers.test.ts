@@ -200,6 +200,41 @@ describe("buildTieredInjection", () => {
     expect(joined).toContain("confidence=0.50");
   });
 
+  it("snapshots tiered injection source labels", () => {
+    const budget: InjectionBudget = {
+      maxTokens: 500,
+      allowedTiers: ["L0", "L1", "L2"],
+      contextFillRatio: 0.5,
+    };
+    const out = buildTieredInjection({
+      kgFacts: [
+        {
+          subject: "Derek",
+          predicate: "uses",
+          object: "OpenClaw",
+          valid_from: "2026-05-11",
+          source_closet: "openclaw:user",
+        },
+      ],
+      searchResults: [
+        { text: "high confidence recall", wing: "w", room: "r", similarity: 0.5 },
+        { text: "deeper context recall", wing: "w", room: "r", similarity: 0.27 },
+      ],
+      budget,
+      tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+      useAaak: true,
+    });
+
+    expect(out).toMatchInlineSnapshot(`
+      [
+        "KG FACTS (source=remempalace KG, authoritative, newest first):",
+        "- Derek:uses=OpenClaw [2026-05-11] [source=openclaw:user]",
+        "[w/r ★0.50] high confidence recall [source=remempalace search, confidence=0.50]",
+        "[w/r ★0.27] deeper context recall [source=remempalace search, confidence=0.27]",
+      ]
+    `);
+  });
+
   it("records per-tier injection token totals into metrics", () => {
     const metrics = new Metrics();
     const budget: InjectionBudget = {
