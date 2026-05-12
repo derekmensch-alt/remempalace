@@ -169,6 +169,7 @@ describe("DiaryReconciler.replay", () => {
     const result = await r.replay();
 
     expect(verifyDiaryPersistence).toHaveBeenCalledOnce();
+    expect(verifyDiaryPersistence).toHaveBeenCalledWith({ timeoutMs: 500 });
     expect(writeDiary).not.toHaveBeenCalled();
     expect(result).toMatchObject({ attempted: 0, succeeded: 0, failed: 0, skipped: true });
     expect(r.lastReplayError).toBe("probe read miss");

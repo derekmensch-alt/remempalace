@@ -99,7 +99,16 @@ describe("RecallService", () => {
   });
 
   it("selects full recall when entity candidates are present", () => {
-    expect(makeService(["remempalace"]).selectRecallMode("continue the refactor")).toBe("full");
+    expect(makeService(["remempalace"]).selectRecallMode("status of the refactor")).toBe("full");
+  });
+
+  it("selects cheap+kg1 recall for entity-bearing continuation prompts", () => {
+    expect(makeService(["remempalace"]).selectRecallMode("continue the remempalace refactor")).toBe(
+      "cheap+kg1",
+    );
+    expect(makeService(["remempalace"]).selectRecallMode("next steps for remempalace")).toBe(
+      "cheap+kg1",
+    );
   });
 
   it("selects cheap recall for ordinary non-specific prompts", () => {
@@ -116,6 +125,37 @@ describe("RecallService", () => {
     const bundle = await service.readBundle("please proceed with the next edit", 5, [], {
       mode: "cheap",
     });
+
+    expect(bundle).toEqual({ searchResults: [], kgResults: { facts: [] } });
+    expect(router.readBundle).not.toHaveBeenCalled();
+  });
+
+  it("cheap+kg1 recall reads one KG candidate without search", async () => {
+    const router = {
+      extractCandidates: vi.fn(() => []),
+      readBundle: vi.fn(async () => ({ searchResults: [], kgResults: { facts: [] } })),
+    };
+    const service = new RecallService(router);
+
+    await service.readBundle("continue the remempalace refactor", 5, ["remempalace"], {
+      mode: "cheap+kg1",
+    });
+
+    expect(router.readBundle).toHaveBeenCalledWith("continue the remempalace refactor", 5, {
+      entityCandidates: ["remempalace"],
+      includeSearch: false,
+      maxKgEntityQueries: 1,
+    });
+  });
+
+  it("cheap+kg1 recall falls back to an empty bundle when no KG candidates exist", async () => {
+    const router = {
+      extractCandidates: vi.fn(() => []),
+      readBundle: vi.fn(async () => ({ searchResults: [], kgResults: { facts: [] } })),
+    };
+    const service = new RecallService(router);
+
+    const bundle = await service.readBundle("continue", 5, [], { mode: "cheap+kg1" });
 
     expect(bundle).toEqual({ searchResults: [], kgResults: { facts: [] } });
     expect(router.readBundle).not.toHaveBeenCalled();

@@ -15,7 +15,7 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
   // should point this at their venv python, e.g.
   // `~/.local/share/pipx/venvs/mempalace/bin/python`.
   mcpPythonBin: "python3",
-  cache: { capacity: 200, ttlMs: 300000, kgTtlMs: 600000 },
+  cache: { capacity: 200, ttlMs: 300000, kgTtlMs: 600000, bundleTtlMs: 180000 },
   injection: {
     maxTokens: 800,
     budgetPercent: 0.15,
@@ -28,6 +28,7 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
     knownEntities: ["OpenClaw", "MemPalace", "remempalace", "Anthropic", "Claude"],
     identityMaxTokens: 150,
     rawIdentity: false,
+    fastRaceMs: 50,
   },
   tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
   diary: {
@@ -53,6 +54,12 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
   memoryRuntime: {
     allowedReadRoots: [`${homedir()}/.mempalace`, `${homedir()}/.openclaw/workspace`],
   },
+  hotCache: {
+    enabled: true,
+    path: `${homedir()}/.mempalace/remempalace/hot-cache.json`,
+    maxEntries: 50,
+    flushIntervalMs: 60_000,
+  },
 };
 
 export function mergeConfig(
@@ -74,6 +81,8 @@ export function mergeConfig(
       : DEFAULT_CONFIG.memoryRuntime.allowedReadRoots,
   };
 
+  const mergedHotCache = { ...DEFAULT_CONFIG.hotCache, ...user.hotCache };
+
   return {
     mcpPythonBin: user.mcpPythonBin ?? DEFAULT_CONFIG.mcpPythonBin,
     cache: { ...DEFAULT_CONFIG.cache, ...user.cache },
@@ -88,5 +97,11 @@ export function mergeConfig(
     prefetch: { ...DEFAULT_CONFIG.prefetch, ...user.prefetch },
     identity,
     memoryRuntime,
+    hotCache: {
+      enabled: mergedHotCache.enabled,
+      path: expandTilde(mergedHotCache.path),
+      maxEntries: mergedHotCache.maxEntries,
+      flushIntervalMs: mergedHotCache.flushIntervalMs,
+    },
   };
 }

@@ -67,6 +67,34 @@ describe("buildStatusReport", () => {
     expect(text).toMatch(/injection\.tokens\.l0.*480/);
   });
 
+  it("renders before_prompt_build latency summary from metrics", () => {
+    const text = buildStatusReport({
+      mcpReady: true,
+      canWriteDiary: true,
+      canReadDiary: true,
+      canInvalidateKg: true,
+      searchCache: { hits: 0, misses: 0, size: 0 },
+      kgCache: { hits: 0, misses: 0, size: 0 },
+      metrics: {
+        "latency.before_prompt_build.init.ms_total": 40,
+        "latency.before_prompt_build.init.count": 2,
+        "latency.before_prompt_build.fetch.ms_total": 90,
+        "latency.before_prompt_build.fetch.count": 3,
+        "latency.before_prompt_build.format.ms_total": 20,
+        "latency.before_prompt_build.format.count": 2,
+        "latency.before_prompt_build.total.ms_total": 170,
+        "latency.before_prompt_build.total.count": 2,
+        "latency.before_prompt_build.total.max_ms": 120,
+      },
+    });
+
+    expect(text).toMatch(/Latency/);
+    expect(text).toMatch(/init: avg=20.0ms n=2/);
+    expect(text).toMatch(/fetch: avg=30.0ms n=3/);
+    expect(text).toMatch(/format: avg=10.0ms n=2/);
+    expect(text).toMatch(/total: avg=85.0ms max=120.0ms n=2/);
+  });
+
   it("renders 'no counters yet' when metrics is empty", () => {
     const text = buildStatusReport({
       mcpReady: true,

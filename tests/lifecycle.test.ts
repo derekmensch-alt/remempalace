@@ -215,6 +215,57 @@ describe("lazy-start: first before_prompt_build triggers mcp.start()", () => {
     expect(mockMcp.start).toHaveBeenCalledTimes(1);
   });
 
+  it("returns runtime disclosure when MCP init exceeds the shared prompt deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      mockMcp.start.mockReturnValue(new Promise(() => {}));
+      const plugin = await importPlugin();
+      const api = makeFakeApi();
+      plugin.register(api);
+
+      const pending = api.emit(
+        "before_prompt_build",
+        { prompt: "what should I do next on remempalace?", messages: [] },
+        { sessionKey: "init-timeout" },
+      );
+      await vi.advanceTimersByTimeAsync(1500);
+      const result = await pending;
+
+      expect(result).toEqual({
+        prependSystemContext: expect.stringContaining("Active Memory Plugin (remempalace)"),
+      });
+      expect(mockMcp.start).toHaveBeenCalledTimes(1);
+      expect(mockMcp.callTool).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the init sub-budget so prompt path does not wait the full shared deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      mockMcp.start.mockReturnValue(new Promise(() => {}));
+      const plugin = await importPlugin();
+      const api = makeFakeApi();
+      plugin.register(api);
+
+      const pending = api.emit(
+        "before_prompt_build",
+        { prompt: "what should I do next on remempalace?", messages: [] },
+        { sessionKey: "init-subbudget-timeout" },
+      );
+      await vi.advanceTimersByTimeAsync(400);
+      const result = await pending;
+
+      expect(result).toEqual({
+        prependSystemContext: expect.stringContaining("Active Memory Plugin (remempalace)"),
+      });
+      expect(mockMcp.callTool).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not double-start if session_start already ran", async () => {
     const plugin = await importPlugin();
     const api = makeFakeApi();
@@ -270,13 +321,78 @@ describe("recall gating: low-semantic prompts", () => {
       { sessionKey: "recall-question" },
     );
 
-    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_search", {
-      query: "what should I do next on remempalace?",
-      limit: 5,
+    expect(mockMcp.callTool).toHaveBeenCalledWith(
+      "mempalace_search",
+      {
+        query: "what should I do next on remempalace?",
+        limit: 5,
+      },
+      8000,
+    );
+    expect(mockMcp.callTool).toHaveBeenCalledWith(
+      "mempalace_kg_query",
+      {
+        entity: "remempalace",
+      },
+      8000,
+    );
+  });
+
+  it("snapshots bounded full-recall injection under a tight token budget", async () => {
+    mockMcp.callTool.mockImplementation((name: string) => {
+      if (name === "mempalace_search") {
+        return Promise.resolve({
+          results: [
+            { text: "top hit content about project X", wing: "w", room: "r", similarity: 0.5 },
+            { text: "second hit content about project X", wing: "w", room: "r", similarity: 0.35 },
+            { text: "deep context hit", wing: "w", room: "r", similarity: 0.27 },
+          ],
+        });
+      }
+      if (name === "mempalace_kg_query") {
+        return Promise.resolve({
+          facts: [
+            {
+              subject: "remempalace",
+              predicate: "status",
+              object: "phase-2",
+              valid_from: "2026-05-11",
+              source_closet: "openclaw:user",
+            },
+          ],
+        });
+      }
+      return Promise.resolve({});
     });
-    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_kg_query", {
-      entity: "remempalace",
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api, {
+      injection: {
+        maxTokens: 120,
+        budgetPercent: 1,
+      },
     });
+
+    const result = await api.emit(
+      "before_prompt_build",
+      { prompt: "what should I do next on remempalace?", messages: [] },
+      { sessionKey: "tight-budget-snapshot" },
+    );
+
+    expect((result as { prependSystemContext: string }).prependSystemContext)
+      .toMatchInlineSnapshot(`
+        "## Active Memory Plugin (remempalace)
+
+        runtime slot: OpenClaw memory plugin = remempalace
+        scope: remempalace recall is separate from workspace files or local markdown notes
+        audit: use /remempalace status to see the most recent recall candidates and counts
+
+        ## Memory Context (remempalace)
+
+        KG FACTS (source=remempalace KG, authoritative, newest first):
+        - remempalace:status=phase-2 [2026-05-11] [source=openclaw:user]
+        "
+      `);
   });
 
   it("uses cheap recall without KG/search for ordinary non-specific prompts", async () => {
@@ -301,6 +417,66 @@ describe("recall gating: low-semantic prompts", () => {
       "mempalace_kg_query",
       expect.anything(),
     );
+  });
+
+  it("uses cheap+kg1 recall for entity-bearing continuation prompts without semantic search", async () => {
+    mockMcp.callTool.mockImplementation((name: string) => {
+      if (name === "mempalace_kg_query") {
+        return Promise.resolve({
+          facts: [
+            {
+              subject: "remempalace",
+              predicate: "phase",
+              object: "3",
+              valid_from: "2026-05-12",
+              source_closet: "openclaw:user",
+            },
+          ],
+        });
+      }
+      if (name === "mempalace_search") {
+        return Promise.resolve({
+          results: [{ text: "semantic search should not be used", wing: "w", room: "r", similarity: 0.9 }],
+        });
+      }
+      return Promise.resolve({});
+    });
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    const result = await api.emit(
+      "before_prompt_build",
+      { prompt: "continue the remempalace refactor", messages: [] },
+      { sessionKey: "cheap-kg1-continuation" },
+    );
+
+    expect(mockMcp.callTool).toHaveBeenCalledWith(
+      "mempalace_kg_query",
+      {
+        entity: "remempalace",
+      },
+      8000,
+    );
+    expect(mockMcp.callTool).not.toHaveBeenCalledWith(
+      "mempalace_search",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect((result as { prependSystemContext: string }).prependSystemContext)
+      .toMatchInlineSnapshot(`
+        "## Active Memory Plugin (remempalace)
+
+        runtime slot: OpenClaw memory plugin = remempalace
+        scope: remempalace recall is separate from workspace files or local markdown notes
+        audit: use /remempalace status to see the most recent recall candidates and counts
+
+        ## Memory Context (remempalace)
+
+        KG FACTS (source=remempalace KG, authoritative, newest first):
+        - remempalace:phase=3 [2026-05-12] [source=openclaw:user]
+        "
+      `);
   });
 
   it("injects cheap diary-prefetch context without prompt-path KG/search", async () => {
@@ -393,13 +569,108 @@ describe("recall gating: low-semantic prompts", () => {
       prependSystemContext: expect.stringContaining("Memory Context (remempalace)"),
     });
     expect(mockMcp.callTool).toHaveBeenCalledTimes(2);
-    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_search", {
-      query: prompt,
-      limit: 5,
-    });
-    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_kg_query", {
-      entity: "remempalace",
-    });
+    expect(mockMcp.callTool).toHaveBeenCalledWith(
+      "mempalace_search",
+      {
+        query: prompt,
+        limit: 5,
+      },
+      8000,
+    );
+    expect(mockMcp.callTool).toHaveBeenCalledWith(
+      "mempalace_kg_query",
+      {
+        entity: "remempalace",
+      },
+      8000,
+    );
+  });
+
+  it("falls back to an empty full-recall bundle when prompt-path recall times out", async () => {
+    vi.useFakeTimers();
+    try {
+      mockMcp.callTool.mockImplementation((name: string) => {
+        if (name === "mempalace_search" || name === "mempalace_kg_query") {
+          return new Promise(() => {});
+        }
+        return Promise.resolve({});
+      });
+      const plugin = await importPlugin();
+      const api = makeFakeApi();
+      plugin.register(api);
+      const prompt = "what should I do next on remempalace?";
+
+      const pending = api.emit(
+        "before_prompt_build",
+        { prompt, messages: [{ role: "user", content: prompt }] },
+        { sessionKey: "timeout-full" },
+      );
+      await vi.advanceTimersByTimeAsync(1500);
+      const result = await pending;
+
+      expect(result).toEqual({
+        prependSystemContext: expect.stringContaining("Active Memory Plugin (remempalace)"),
+      });
+      expect((result as { prependSystemContext: string }).prependSystemContext).not.toContain(
+        "Memory Context (remempalace)",
+      );
+      expect(mockMcp.callTool).toHaveBeenCalledWith(
+        "mempalace_search",
+        {
+          query: prompt,
+          limit: 5,
+        },
+        8000,
+      );
+      expect(mockMcp.callTool).toHaveBeenCalledWith(
+        "mempalace_kg_query",
+        {
+          entity: "remempalace",
+        },
+        8000,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to empty timeline context when timeline recall exceeds the shared prompt deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      mockMcp.hasDiaryRead = true;
+      mockMcp.callTool.mockImplementation((name: string) => {
+        if (name === "mempalace_kg_timeline") {
+          return new Promise(() => {});
+        }
+        if (name === "mempalace_diary_read") {
+          return Promise.resolve({ entries: [] });
+        }
+        return Promise.resolve({});
+      });
+      const plugin = await importPlugin();
+      const api = makeFakeApi();
+      plugin.register(api);
+
+      const pending = api.emit(
+        "before_prompt_build",
+        { prompt: "what happened last week?", messages: [] },
+        { sessionKey: "timeout-timeline" },
+      );
+      await vi.advanceTimersByTimeAsync(1500);
+      const result = await pending;
+
+      expect(result).toEqual({
+        prependSystemContext: expect.stringContaining("Timeline Context (remempalace)"),
+      });
+      expect((result as { prependSystemContext: string }).prependSystemContext).toContain(
+        "Active Memory Plugin (remempalace)",
+      );
+      expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_kg_timeline", {
+        days_back: 7,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -676,5 +947,119 @@ describe("injection deduplication: builder is no-op when hook fired", () => {
     const result = capturedBuilder!({ sessionKey });
 
     expect(result).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// before_prompt_build injection snapshot tests: budget-bounded formatting
+//
+// These tests verify that, after wrapper overhead is subtracted, the tiered
+// packer produces stable output across different budget regimes.  The mock
+// data is the same across all scenarios so only the budget changes.
+// ---------------------------------------------------------------------------
+
+function makeBudgetMock() {
+  return (name: string) => {
+    if (name === "mempalace_search") {
+      return Promise.resolve({
+        results: [
+          { text: "top hit content about project X", wing: "w", room: "r", similarity: 0.5 },
+          { text: "second hit content about project X", wing: "w", room: "r", similarity: 0.35 },
+          { text: "deep context hit", wing: "w", room: "r", similarity: 0.27 },
+        ],
+      });
+    }
+    if (name === "mempalace_kg_query") {
+      return Promise.resolve({
+        facts: [
+          {
+            subject: "remempalace",
+            predicate: "status",
+            object: "phase-2",
+            valid_from: "2026-05-11",
+            source_closet: "openclaw:user",
+          },
+        ],
+      });
+    }
+    return Promise.resolve({});
+  };
+}
+
+describe("before_prompt_build injection snapshots: budget regimes", () => {
+  it("generous budget (maxTokens: 800) includes L0 KG + L1 hits + L2 hit", async () => {
+    mockMcp.callTool.mockImplementation(makeBudgetMock());
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api, {
+      injection: {
+        maxTokens: 800,
+        budgetPercent: 1,
+      },
+    });
+
+    const result = await api.emit(
+      "before_prompt_build",
+      { prompt: "what should I do next on remempalace?", messages: [] },
+      { sessionKey: "generous-budget-snapshot" },
+    );
+
+    expect((result as { prependSystemContext: string }).prependSystemContext)
+      .toMatchInlineSnapshot(`
+        "## Active Memory Plugin (remempalace)
+
+        runtime slot: OpenClaw memory plugin = remempalace
+        scope: remempalace recall is separate from workspace files or local markdown notes
+        audit: use /remempalace status to see the most recent recall candidates and counts
+
+        ## Memory Context (remempalace)
+
+        KG FACTS (source=remempalace KG, authoritative, newest first):
+        - remempalace:status=phase-2 [2026-05-11] [source=openclaw:user]
+        [w/r ★0.50] top hit content about project X [source=remempalace search, confidence=0.50]
+        [w/r ★0.35] second hit content about project X [source=remempalace search, confidence=0.35]
+        [w/r ★0.27] deep context hit [source=remempalace search, confidence=0.27]
+        "
+      `);
+  });
+
+  it("moderate budget (maxTokens: 153) includes L0 KG + L1 hits but drops L2", async () => {
+    mockMcp.callTool.mockImplementation(makeBudgetMock());
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api, {
+      injection: {
+        maxTokens: 153,
+        budgetPercent: 1,
+      },
+    });
+
+    const result = await api.emit(
+      "before_prompt_build",
+      { prompt: "what should I do next on remempalace?", messages: [] },
+      { sessionKey: "moderate-budget-snapshot" },
+    );
+
+    const ctx = result as { prependSystemContext: string };
+    // L2 hit must be absent
+    expect(ctx.prependSystemContext).not.toContain("deep context hit");
+    // L1 hits must be present
+    expect(ctx.prependSystemContext).toContain("top hit content about project X");
+    expect(ctx.prependSystemContext).toContain("second hit content about project X");
+    expect(ctx.prependSystemContext).toMatchInlineSnapshot(`
+      "## Active Memory Plugin (remempalace)
+
+      runtime slot: OpenClaw memory plugin = remempalace
+      scope: remempalace recall is separate from workspace files or local markdown notes
+      audit: use /remempalace status to see the most recent recall candidates and counts
+
+      ## Memory Context (remempalace)
+
+      KG FACTS (source=remempalace KG, authoritative, newest first):
+      - remempalace:status=phase-2 [2026-05-11] [source=openclaw:user]
+      [w/r ★0.50] top hit content about project X [source=remempalace search, confidence=0.50]
+      [w/r ★0.35] second hit content about project X [source=remempalace search, confidence=0.35]
+      "
+    `);
   });
 });

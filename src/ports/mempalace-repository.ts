@@ -3,6 +3,7 @@ import type { KgFact, PalaceStatus, SearchResult } from "../types.js";
 export interface MemorySearchRequest {
   query: string;
   limit: number;
+  timeoutMs?: number;
 }
 
 export interface KgTimelineRequest {
@@ -16,6 +17,7 @@ export interface KgTimelineEvent {
 
 export interface KgEntityQueryRequest {
   entity: string;
+  timeoutMs?: number;
 }
 
 export interface KgInvalidateRequest {
@@ -49,6 +51,10 @@ export interface DiaryPersistenceProbeResult {
   state: DiaryPersistenceState;
   verified: boolean;
   error?: string;
+}
+
+export interface DiaryPersistenceProbeRequest {
+  timeoutMs?: number;
 }
 
 export type MemPalaceRepositoryErrorCode =
@@ -106,5 +112,5 @@ export interface MemPalaceRepository {
   readKgTimeline(request: KgTimelineRequest): Promise<KgTimelineEvent[]>;
   writeDiary(request: DiaryWriteRequest): Promise<unknown>;
   readDiary<T = unknown>(request: DiaryReadRequest): Promise<T>;
-  verifyDiaryPersistence(): Promise<DiaryPersistenceProbeResult>;
+  verifyDiaryPersistence(request?: DiaryPersistenceProbeRequest): Promise<DiaryPersistenceProbeResult>;
 }

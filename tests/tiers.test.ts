@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { buildTieredInjection } from "../src/tiers.js";
 import { Metrics } from "../src/metrics.js";
+import { countTokens } from "../src/token-counter.js";
 import type { SearchResult, KgFact, InjectionBudget } from "../src/types.js";
 
 describe("buildTieredInjection", () => {
@@ -200,6 +201,26 @@ describe("buildTieredInjection", () => {
     expect(joined).toContain("confidence=0.50");
   });
 
+  it("filters L1/L2 candidates before applying bounded formatting windows", () => {
+    const budget: InjectionBudget = { maxTokens: 500, allowedTiers: ["L1", "L2"], contextFillRatio: 0.5 };
+    const out = buildTieredInjection({
+      kgFacts: [],
+      searchResults: [
+        { text: "below threshold first", wing: "w", room: "r", similarity: 0.1 },
+        { text: "deep qualifying context", wing: "w", room: "r", similarity: 0.27 },
+        { text: "high qualifying context", wing: "w", room: "r", similarity: 0.5 },
+      ],
+      budget,
+      tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+      useAaak: true,
+    });
+
+    const joined = out.join("\n");
+    expect(joined).toContain("high qualifying context");
+    expect(joined).toContain("deep qualifying context");
+    expect(joined).not.toContain("below threshold first");
+  });
+
   it("snapshots tiered injection source labels", () => {
     const budget: InjectionBudget = {
       maxTokens: 500,
@@ -256,6 +277,51 @@ describe("buildTieredInjection", () => {
     expect(snap["injection.tokens.l1"]).toBeGreaterThan(0);
   });
 
+  it("reserves fixedOverheadTokens before packing, reducing effective memory budget", () => {
+    // Without overhead: all facts fit in budget=500
+    const facts: KgFact[] = [
+      { subject: "A", predicate: "p", object: "1" },
+      { subject: "B", predicate: "p", object: "2" },
+      { subject: "C", predicate: "p", object: "3" },
+    ];
+    const budget: InjectionBudget = { maxTokens: 500, allowedTiers: ["L0"], contextFillRatio: 0.5 };
+    const without = buildTieredInjection({
+      kgFacts: facts,
+      searchResults: [],
+      budget,
+      tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+      useAaak: true,
+    });
+
+    // With large overhead: effective budget is tiny, fewer lines fit
+    const withOverhead = buildTieredInjection({
+      kgFacts: facts,
+      searchResults: [],
+      budget,
+      tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+      useAaak: true,
+      fixedOverheadTokens: 490,
+    });
+
+    expect(without.join("\n")).toContain("A:p=1");
+    expect(without.join("\n")).toContain("C:p=3");
+    // 10-token effective budget cannot fit all three facts
+    expect(withOverhead.join("\n").length).toBeLessThan(without.join("\n").length);
+  });
+
+  it("returns empty when fixedOverheadTokens consumes the entire budget", () => {
+    const budget: InjectionBudget = { maxTokens: 50, allowedTiers: ["L0", "L1", "L2"], contextFillRatio: 0.5 };
+    const out = buildTieredInjection({
+      kgFacts: sampleFacts,
+      searchResults: sampleResults,
+      budget,
+      tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+      useAaak: true,
+      fixedOverheadTokens: 50,
+    });
+    expect(out).toEqual([]);
+  });
+
   it("does not record tokens when no tiers allowed", () => {
     const metrics = new Metrics();
     const budget: InjectionBudget = { maxTokens: 0, allowedTiers: [], contextFillRatio: 0.9 };
@@ -268,5 +334,95 @@ describe("buildTieredInjection", () => {
       metrics,
     });
     expect(metrics.snapshot()).toEqual({});
+  });
+
+  it("bounds L2 candidate formatting by remaining token capacity", () => {
+    const budget: InjectionBudget = {
+      maxTokens: 5,
+      allowedTiers: ["L2"],
+      contextFillRatio: 0.9,
+    };
+    const results = Array.from({ length: 6 }, (_, i) => ({
+      text: `deep context ${i}`,
+      wing: "w",
+      room: "r",
+      similarity: 0.26,
+    }));
+    Object.defineProperty(results[5], "text", {
+      get() {
+        throw new Error("should not format beyond remaining-token upper bound");
+      },
+      configurable: true,
+    });
+
+    expect(() =>
+      buildTieredInjection({
+        kgFacts: [],
+        searchResults: results,
+        budget,
+        tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+        useAaak: true,
+      }),
+    ).not.toThrow();
+  });
+
+  it("bounds L1 candidate formatting by remaining token capacity", () => {
+    const budget: InjectionBudget = {
+      maxTokens: 1,
+      allowedTiers: ["L1"],
+      contextFillRatio: 0.9,
+    };
+    const results = Array.from({ length: 4 }, (_, i) => ({
+      text: `top context ${i}`,
+      wing: "w",
+      room: "r",
+      similarity: 0.5,
+    }));
+    Object.defineProperty(results[1], "text", {
+      get() {
+        throw new Error("should not format L1 beyond remaining-token upper bound");
+      },
+      configurable: true,
+    });
+
+    expect(() =>
+      buildTieredInjection({
+        kgFacts: [],
+        searchResults: results,
+        budget,
+        tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+        useAaak: true,
+      }),
+    ).not.toThrow();
+  });
+
+  it("bounds L0 candidate formatting after the header fits", () => {
+    const header = "KG FACTS (source=remempalace KG, authoritative, newest first):";
+    const firstLine = "- A:p=1 [source=unknown]";
+    const budget: InjectionBudget = {
+      maxTokens: countTokens(header) + countTokens(firstLine),
+      allowedTiers: ["L0"],
+      contextFillRatio: 0.9,
+    };
+    const facts: KgFact[] = [
+      { subject: "A", predicate: "p", object: "1" },
+      { subject: "B", predicate: "p", object: "2" },
+    ];
+    Object.defineProperty(facts[1], "subject", {
+      get() {
+        throw new Error("should not format L0 facts beyond remaining-token upper bound");
+      },
+      configurable: true,
+    });
+
+    expect(() =>
+      buildTieredInjection({
+        kgFacts: facts,
+        searchResults: [],
+        budget,
+        tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
+        useAaak: true,
+      }),
+    ).not.toThrow();
   });
 });

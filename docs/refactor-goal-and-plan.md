@@ -143,16 +143,20 @@ MemPalace MCP server
 - [x] Make recall conditional: skip full recall or use cheap mode for tiny acknowledgements, thanks/ok messages, simple tool follow-up chatter, and prompts without enough semantic content.
 - [x] Add a two-tier recall mode: cheap lexical/entity recall by default, full semantic search + KG only for question-like, project-specific, prior-context, or named-entity prompts. Initial cheap/full classifier, cheap diary-prefetch lexical context, and prompt-path snapshots are in place.
 - [x] Precompute recall on `llm_input` when possible so `before_prompt_build` can reuse already-started or already-completed work.
-- [ ] Race fast sources first: use cached recall, identity, and last-session summaries immediately; let slower KG/search update cache in the background for the next turn.
-- [ ] Reduce KG fanout: cap per-prompt entity KG queries to 1-2 by default unless the prompt clearly needs broader memory, or batch KG on the MemPalace side if available.
-- [ ] Deduplicate KG entity queries across aliases/normalized roots and skip generic entities like `project`, `this`, `it`, `memory`, and `OpenClaw` unless explicitly useful.
-- [ ] Cache recall more aggressively with a normalized "last user intent" cache, TTL around 2-5 minutes, and reuse previous recall bundles for same-topic follow-up messages.
-- [ ] Add negative caching for empty or timed-out KG/search queries with a short TTL around 1-5 minutes.
-- [ ] Persist a small hot recall/health cache across plugin restarts to reduce cold-start latency.
-- [ ] Lower prompt-path recall MCP timeouts from 8000ms to roughly 1200-2000ms, with graceful empty fallback.
-- [ ] Add a hard shared prompt-path memory budget, e.g. 1500ms total for `before_prompt_build`, where search, KG, identity, formatting, and token-budget work all consume from one deadline.
-- [ ] Limit formatting/token-budget work by building fewer candidate lines before token counting instead of assembling a large block and trimming afterward.
-- [ ] Gate: before_prompt_build tests compare expected injection blocks.
+- [x] Race fast sources first: use cached recall, identity, and last-session summaries immediately; let slower KG/search update cache in the background for the next turn.
+- [x] Reduce KG fanout: cap per-prompt entity KG queries to 1-2 by default unless the prompt clearly needs broader memory, or batch KG on the MemPalace side if available.
+- [x] Deduplicate KG entity queries across aliases/normalized roots and skip generic entities like `project`, `this`, `it`, `memory`, and `OpenClaw` unless explicitly useful.
+- [x] Cache recall more aggressively with a normalized "last user intent" cache, TTL around 2-5 minutes, and reuse previous recall bundles for same-topic follow-up messages.
+- [x] Add negative caching for empty or timed-out KG/search queries with a short TTL around 1-5 minutes.
+- [x] Persist a small hot recall cache across plugin restarts to reduce cold-start latency.
+- [x] Bound prompt-path recall waits with the 1500ms shared memory deadline and graceful empty fallback while leaving repository MCP call timeouts configurable.
+- [x] Add a hard shared prompt-path memory budget, e.g. 1500ms total for `before_prompt_build`, where search, KG, identity, formatting, and token-budget work all consume from one deadline.
+- [x] Limit formatting/token-budget work by building fewer candidate lines before token counting instead of assembling a large block and trimming afterward.
+- [x] Gate: before_prompt_build tests compare expected injection blocks.
+- [x] Add a middle recall mode (`cheap+kg1`) for "continue/next step" prompts: cheap path plus a single KG entity query for better relevance with low latency.
+- [x] Reuse precomputed recall across normalized-intent follow-ups (whitespace/case normalized prompt key) with short TTL (2-5 min).
+- [x] Reduce prompt-path token counting overhead by precomputing static token costs for fixed headers/prefixes.
+- [x] Harden hot recall cache invalidation bookkeeping by pruning stale reverse-index entries, preserving fresher in-session bundles during warm import, and invalidating KG/bundle cache entries by normalized alias roots.
 
 ### Phase 4 — Extract learning
 
@@ -174,22 +178,32 @@ MemPalace MCP server
 - [ ] Add concise probe output: MCP ready, tools present, diary persistent, KG writable, pending fallback count, cache stats, last recall.
 - [ ] Add latency metrics, not just counters: `before_prompt_build`, `mempalace_search`, `mempalace_kg_query`, diary read/write, formatting, and token-budget work.
 - [ ] Show latency summaries in `/remempalace status` so slow recall, KG, search, diary, formatting, and token-budget work are visible.
+- [ ] Add stage-level prompt-path latency metrics (`init`, `timeline/recall fetch`, `formatting`) with bounded sub-budgets.
 - [ ] Add backend circuit breakers: if MemPalace search, KG, or diary times out/fails repeatedly, disable that backend briefly and serve local/cache-only memory during cooldown.
 - [ ] Keep status/health probes out of the prompt path; prompt build should consume cached health, not discover backend health synchronously.
 - [ ] Keep opt-in debug logging but avoid dumping full prompt content by default.
+- [ ] Prefer user-facing health labels (`healthy`, `degraded`, `offline`) with latest probe reason and replay outcome in `/remempalace status`.
+- [ ] Persist a small hot recall/health cache across plugin restarts to reduce cold-start latency.
 - [ ] Update `TROUBLESHOOTING.md`, `CONFIGURATION.md`, and smoke test docs.
 - [ ] Gate: manual `/remempalace status` check plus smoke script.
 
 ### Performance fast path — recommended first patch
 
 - [ ] Add timing metrics for prompt-path work and MCP calls.
-- [ ] Short-circuit broken diary MCP calls to JSONL fallback, or enforce a 200-500ms diary MCP timeout.
+- [ ] Short-circuit broken diary MCP calls to JSONL fallback, and enforce a 200-500ms diary MCP timeout on probe/read/write.
 - [ ] Reduce recall call timeout to roughly 1200-2000ms and return empty memory context on timeout.
 - [ ] Add a shared `before_prompt_build` memory deadline so slow sources cannot stall the whole assistant.
 - [ ] Add negative caching and basic backend circuit breakers for repeated timeouts.
 - [ ] Use cheap recall mode for short acknowledgements and low-semantic-content turns.
+- [ ] Add a low-latency `cheap+kg1` mode for "continue/next step" prompts.
+- [ ] Reuse normalized-intent precompute results for follow-up prompts within short TTL.
 - [ ] Keep behavior graceful: memory should help when fast, not stall the assistant.
 - [ ] Gate: `npm run lint && npm test`; status output shows latency data.
+
+### Reliability hardening — persistence semantics
+
+- [ ] Ensure diary replay does not mark JSONL entries replayed on write-ack alone; require post-write read verification or a fresh successful persistence probe in the same replay cycle.
+- [ ] Keep operational health/fallback state out of prompt injection and fully visible in `/remempalace status` and logs.
 
 ### Phase 7 — Final acceptance
 
@@ -217,9 +231,9 @@ The refactor is successful if:
 
 - Created: 2026-05-11
 - Owner: main OpenClaw assistant session
-- Last updated: 2026-05-11T12:03:20-04:00
-- Status: Phase 0, Phase 1, and Phase 2 complete. Phase 3 extraction is partially complete: `RecallService`, `PromptInjectionService`, exactly-once hook/builder coverage, source-label snapshots, low-semantic recall skips, two-tier recall with cheap diary-prefetch context, and `llm_input` recall precompute are in place.
-- Current gate: `npm run lint` and `npm test` pass in the default suite.
+- Last updated: 2026-05-12T18:10:00-04:00
+- Status: Phase 0, Phase 1, and Phase 2 complete. Phase 3 extraction is partially complete: `RecallService`, `PromptInjectionService`, exactly-once hook/builder coverage, source-label snapshots, low-semantic recall skips, two-tier recall with cheap diary-prefetch context, `cheap+kg1` continuation recall, normalized-intent `llm_input` recall precompute reuse, a 1500ms shared prompt-path memory deadline, KG fanout/dedup controls, timeout-only negative caching, hot recall cache import/export/invalidation hardening, bounded tiered-injection formatting, and static wrapper token-cost precomputation are in place.
+- Current gate: `npm run lint` and `npm test` pass in the default suite. Latest local full test run observed 472 passed / 6 skipped across 36 files.
 - Boundary check: raw `callTool(` usage is isolated to `src/adapters/mcp-mempalace-repository.ts`.
 - Handoff details: see `docs/current-refactor-status.md`.
-- Immediate next task: add prompt-path deadline controls around full recall so reused or freshly-started search/KG work cannot stall `before_prompt_build` indefinitely.
+- Immediate next task: update configuration and smoke-test docs for the new fast-path settings before moving into Phase 4 learning extraction.

@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { mergeConfig } from "./config.js";
 import { createLogger } from "./logger.js";
+import { loadHotCache, saveHotCache } from "./recall-cache-store.js";
 
 const DEBUG_PATH = "/tmp/remempalace-last-inject.log";
 async function debugLog(label: string, data: unknown): Promise<void> {
@@ -15,7 +16,7 @@ async function debugLog(label: string, data: unknown): Promise<void> {
 }
 import { MemoryCache } from "./cache.js";
 import { McpClient } from "./mcp-client.js";
-import { MemoryRouter, type ReadBundle } from "./router.js";
+import { MemoryRouter, normalizeIntent, type ReadBundle } from "./router.js";
 import type { SearchResult, RemempalaceConfig } from "./types.js";
 import { BudgetManager } from "./budget.js";
 import { buildTieredInjection } from "./tiers.js";
@@ -101,7 +102,68 @@ interface HookContext {
 interface PrecomputedRecall {
   prompt: string;
   candidates: string[];
+  intentKey: string;
+  expiresAt: number;
   promise: Promise<ReadBundle>;
+}
+
+export const PROMPT_RECALL_DEADLINE_MS = 1500;
+export const PROMPT_STAGE_BUDGETS_MS = {
+  init: 400,
+  fetch: 900,
+  format: 200,
+} as const;
+
+export interface PromptMemoryDeadline {
+  readonly startedAt: number;
+  readonly timeoutMs: number;
+  elapsedMs(): number;
+  remainingMs(): number;
+}
+
+export function createPromptMemoryDeadline(
+  timeoutMs = PROMPT_RECALL_DEADLINE_MS,
+  now: () => number = Date.now,
+): PromptMemoryDeadline {
+  const startedAt = now();
+  return {
+    startedAt,
+    timeoutMs,
+    elapsedMs: () => Math.max(0, now() - startedAt),
+    remainingMs: () => Math.max(0, timeoutMs - Math.max(0, now() - startedAt)),
+  };
+}
+
+export async function withPromptMemoryDeadline<T>(
+  promise: Promise<T>,
+  fallback: T,
+  deadlineOrTimeout: PromptMemoryDeadline | number = PROMPT_RECALL_DEADLINE_MS,
+): Promise<{ value: T; timedOut: boolean }> {
+  const timeoutMs =
+    typeof deadlineOrTimeout === "number"
+      ? deadlineOrTimeout
+      : deadlineOrTimeout.remainingMs();
+  if (timeoutMs <= 0) return { value: fallback, timedOut: true };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ value, timedOut: false })),
+      new Promise<{ value: T; timedOut: boolean }>((resolve) => {
+        timeout = setTimeout(() => resolve({ value: fallback, timedOut: true }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+export const withPromptRecallDeadline = withPromptMemoryDeadline;
+
+export function stageBudgetMs(
+  deadline: PromptMemoryDeadline,
+  stageCapMs: number,
+): number {
+  return Math.max(0, Math.min(deadline.remainingMs(), Math.max(0, stageCapMs)));
 }
 
 export type KgFactSourceRole = "user" | "assistant" | "system";
@@ -159,6 +221,10 @@ function latestUserPrompt(messages: SessionMessage[]): string {
   return "";
 }
 
+function emptyRecallBundle(): ReadBundle {
+  return { searchResults: [], kgResults: { facts: [] } };
+}
+
 function normalizeKgResult(raw: unknown): KgFact[] {
   if (!raw || typeof raw !== "object") return [];
   if (Array.isArray(raw)) return raw as KgFact[];
@@ -207,6 +273,8 @@ const plugin = {
       similarityThreshold: cfg.injection.similarityThreshold,
       knownEntities: cfg.injection.knownEntities,
       metrics,
+      bundleCacheTtlMs: cfg.cache.bundleTtlMs,
+      bundleCacheCapacity: cfg.cache.capacity,
     });
     const diaryService = new DiaryService({
       repository: mempalaceRepository,
@@ -222,6 +290,39 @@ const plugin = {
       metrics,
       minIntervalMs: 5 * 60 * 1000,
     });
+
+    // Hot cache: warm-load on register, periodic flush, final flush on stop.
+    let hotCacheInterval: ReturnType<typeof setInterval> | null = null;
+
+    const flushHotCache = async (): Promise<void> => {
+      try {
+        const entries = router.exportHotEntries(cfg.hotCache.maxEntries);
+        await saveHotCache(cfg.hotCache.path, {
+          version: 1,
+          savedAt: Date.now(),
+          entries,
+        });
+        metrics.inc("recall.hot_cache.flushed_entries", entries.length);
+      } catch {
+        metrics.inc("recall.hot_cache.flush_failed");
+      }
+    };
+
+    if (cfg.hotCache.enabled) {
+      // Fire-and-forget warm load; do not block registration.
+      loadHotCache(cfg.hotCache.path)
+        .then((snapshot) => {
+          if (snapshot) {
+            const loaded = router.importHotEntries(snapshot.entries, Date.now());
+            metrics.inc("recall.hot_cache.loaded_entries", loaded);
+          }
+        })
+        .catch(() => metrics.inc("recall.hot_cache.load_failed"));
+
+      hotCacheInterval = setInterval(() => {
+        void flushHotCache();
+      }, cfg.hotCache.flushIntervalMs);
+    }
 
     // Declared before ensureInit so the closure can call heartbeat.start().
     const heartbeat = new HeartbeatWarmer({
@@ -344,6 +445,8 @@ const plugin = {
             for (const f of facts) {
               router.deleteKgEntity(f.subject);
               router.deleteKgEntity(f.object);
+              router.deleteBundleCacheEntriesForEntity(f.subject);
+              router.deleteBundleCacheEntriesForEntity(f.object);
             }
           },
         })
@@ -438,11 +541,13 @@ const plugin = {
             precomputedRecallBySession.delete(key);
             return;
           }
+          const intentKey = normalizeIntent(prompt, candidates);
+          const expiresAt = Date.now() + cfg.cache.bundleTtlMs;
           const existing = precomputedRecallBySession.get(key);
           if (
             existing &&
-            existing.prompt === prompt &&
-            existing.candidates.join("\0") === candidates.join("\0")
+            existing.intentKey === intentKey &&
+            existing.expiresAt > Date.now()
           ) {
             return;
           }
@@ -457,7 +562,13 @@ const plugin = {
               error: err.message,
             });
           });
-          precomputedRecallBySession.set(key, { prompt, candidates, promise });
+          precomputedRecallBySession.set(key, {
+            prompt,
+            candidates,
+            intentKey,
+            expiresAt,
+            promise,
+          });
         }
       });
 
@@ -484,8 +595,8 @@ const plugin = {
       }
 
       api.on("before_prompt_build", async (event: unknown, ctx: unknown) => {
-        await initPromise;
         metrics.inc("recall.invoked");
+        const promptStartedAt = Date.now();
         const ev = event as PromptBuildEvent;
         const hctx = ctx as HookContext & { modelId?: string; contextWindow?: number };
         const sessionKey = hctx?.sessionKey ?? "default";
@@ -507,11 +618,50 @@ const plugin = {
           return;
         }
 
+        const memoryDeadline = createPromptMemoryDeadline();
+        const initBudgetMs = stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.init);
+        const initResult = await withPromptMemoryDeadline(
+          initPromise.then(() => true),
+          false,
+          initBudgetMs,
+        );
+        const initLatencyMs = Math.max(0, Date.now() - promptStartedAt);
+        metrics.inc("latency.before_prompt_build.init.ms_total", initLatencyMs);
+        metrics.inc("latency.before_prompt_build.init.count");
+        if (initResult.timedOut || !initResult.value) {
+          metrics.inc("recall.init.timeout");
+          await debugLog("before_prompt_build:init-timeout", {
+            sessionKey,
+            deadlineMs: memoryDeadline.timeoutMs,
+          });
+          const lines = promptInjectionService.buildRuntimeDisclosure();
+          cachedBySession.set(sessionKey, lines);
+          return { prependSystemContext: lines.join("\n") };
+        }
+
         // Timeline branch: bypass tiered recall for temporal queries
         if (isTimelineQuery(prompt)) {
           metrics.inc("recall.timeline.calls");
           try {
-            const tl = await queryTimeline(mempalaceRepository, { daysBack: 7 });
+            const timelineResult = await withPromptMemoryDeadline(
+              queryTimeline(mempalaceRepository, {
+                daysBack: 7,
+                diaryReadTimeoutMs: Math.min(
+                  500,
+                  stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.fetch),
+                ),
+              }),
+              { diary: [], events: [] },
+              stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.fetch),
+            );
+            const tl = timelineResult.value;
+            if (timelineResult.timedOut) {
+              metrics.inc("recall.timeline.timeout");
+              await debugLog("before_prompt_build:timeline-timeout", {
+                sessionKey,
+                deadlineMs: memoryDeadline.timeoutMs,
+              });
+            }
             const lines = promptInjectionService.buildTimelineContext(tl);
             cachedBySession.set(sessionKey, lines);
             const block = lines.join("\n");
@@ -554,6 +704,7 @@ const plugin = {
             : "";
 
         try {
+          const fetchStartedAt = Date.now();
           const candidates = recallService.extractCandidates(prompt);
           if (process.env.REMEMPALACE_DEBUG === "1") {
             await debugLog("before_prompt_build:candidates", {
@@ -579,6 +730,8 @@ const plugin = {
           const recallMode = recallService.selectRecallMode(prompt, candidates);
           if (recallMode === "cheap") {
             metrics.inc("recall.cheap.calls");
+          } else if (recallMode === "cheap+kg1") {
+            metrics.inc("recall.cheap_kg1.calls");
           }
           await debugLog("before_prompt_build:recall-mode", {
             sessionKey,
@@ -586,20 +739,114 @@ const plugin = {
             candidateCount: candidates.length,
           });
           const precomputed = precomputedRecallBySession.get(sessionKey);
-          const canUsePrecomputed =
-            recallMode === "full" &&
-            precomputed?.prompt === prompt &&
-            precomputed.candidates.join("\0") === candidates.join("\0");
-          const bundle = canUsePrecomputed
-            ? await precomputed.promise
-            : await recallService.readBundle(prompt, 5, candidates, { mode: recallMode });
-          if (canUsePrecomputed) {
-            metrics.inc("recall.precompute.used");
+          const intentKey = normalizeIntent(prompt, candidates);
+          const precomputedExpired =
+            precomputed !== undefined && precomputed.expiresAt <= Date.now();
+          if (precomputedExpired) {
             precomputedRecallBySession.delete(sessionKey);
           }
+          const canUsePrecomputed =
+            recallMode === "full" &&
+            precomputed !== undefined &&
+            !precomputedExpired &&
+            precomputed.intentKey === intentKey;
+          const bundlePromise = canUsePrecomputed
+            ? precomputed.promise
+            : recallService.readBundle(prompt, 5, candidates, { mode: recallMode });
+          bundlePromise.catch((err: Error) => {
+            void debugLog("before_prompt_build:background-recall-error", {
+              sessionKey,
+              recallMode,
+              error: err.message,
+            });
+          });
+
+          // Fast-race for full-recall mode: only await the bundle for a short
+          // window (fastRaceMs). If the bundle is already resolved (precomputed),
+          // this wins immediately. If the MCP call is still in-flight, we fall
+          // back to cheap mode and let the bundle keep running in the background
+          // — its router.search / router.kgQuery calls will still populate the
+          // LRU caches for the next turn.
+          let bundle: ReadBundle;
+          let usedFastRace = false;
+          let usedCheapKgFallback = false;
+          if (recallMode === "full") {
+            const fastRaceMs = Math.min(
+              cfg.injection.fastRaceMs,
+              stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.fetch),
+            );
+            const fastResult = await withPromptMemoryDeadline(
+              bundlePromise,
+              null as unknown as ReadBundle,
+              fastRaceMs,
+            );
+            if (!fastResult.timedOut) {
+              // Bundle resolved within the fast window — use it.
+              metrics.inc("recall.fast_race.hit");
+              bundle = fastResult.value;
+            } else {
+              // Bundle not ready yet — fall back to cheap mode for this prompt.
+              // The bundle promise keeps running and writes to LRU caches.
+              metrics.inc("recall.fast_race.miss");
+              usedFastRace = true;
+              // Keep a reference so the promise is not GC'd before it resolves.
+              bundlePromise.catch(() => {
+                // errors already handled by the precompute catch above
+              });
+              bundle = emptyRecallBundle();
+            }
+
+            // Emit recall.full.timeout if the overall prompt-path deadline is
+            // exhausted (covers edge cases where init consumed nearly all of
+            // memoryDeadline before the fast race ran).
+            if (memoryDeadline.remainingMs() <= 0) {
+              metrics.inc("recall.full.timeout");
+              await debugLog("before_prompt_build:recall-timeout", {
+                sessionKey,
+                recallMode,
+                deadlineMs: PROMPT_RECALL_DEADLINE_MS,
+                usedPrecomputed: canUsePrecomputed,
+                fastRaceMiss: usedFastRace,
+              });
+            }
+          } else if (recallMode === "cheap+kg1") {
+            const cheapKgResult = await withPromptMemoryDeadline(
+              bundlePromise,
+              emptyRecallBundle(),
+              Math.min(
+                cfg.injection.fastRaceMs,
+                stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.fetch),
+              ),
+            );
+            if (cheapKgResult.timedOut) {
+              metrics.inc("recall.cheap_kg1.timeout");
+              usedCheapKgFallback = true;
+            }
+            bundle = cheapKgResult.value;
+          } else {
+            bundle = await bundlePromise;
+          }
+
+          if (canUsePrecomputed) {
+            metrics.inc("recall.precompute.used");
+            if (precomputed.prompt !== prompt) {
+              metrics.inc("recall.precompute.intent_used");
+            }
+            precomputedRecallBySession.delete(sessionKey);
+          }
+          const fetchLatencyMs = Math.max(0, Date.now() - fetchStartedAt);
+          metrics.inc("latency.before_prompt_build.fetch.ms_total", fetchLatencyMs);
+          metrics.inc("latency.before_prompt_build.fetch.count");
+          const formatStartedAt = Date.now();
+          const formatBudgetMs = stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.format);
           const kgFacts = normalizeKgResult(bundle.kgResults);
+          const overheadTokens = promptInjectionService.computeOverheadTokens({
+            identityIncluded: identityCompacted.length > 0,
+          });
           const injected =
-            recallMode === "cheap"
+            formatBudgetMs <= 0
+              ? []
+              : recallMode === "cheap" || usedFastRace || usedCheapKgFallback
               ? recallService.buildCheapMemoryLines({
                   prompt,
                   diaryEntries: start?.diaryEntries,
@@ -612,12 +859,20 @@ const plugin = {
                   tiers: cfg.tiers,
                   useAaak: cfg.injection.useAaak,
                   metrics,
+                  fixedOverheadTokens: overheadTokens,
                 });
 
           lines = promptInjectionService.buildRecallContext({
             identity: identityCompacted,
             memoryLines: injected,
           });
+          const formatLatencyMs = Math.max(0, Date.now() - formatStartedAt);
+          metrics.inc("latency.before_prompt_build.format.ms_total", formatLatencyMs);
+          metrics.inc("latency.before_prompt_build.format.count");
+          const totalLatencyMs = Math.max(0, Date.now() - promptStartedAt);
+          metrics.inc("latency.before_prompt_build.total.ms_total", totalLatencyMs);
+          metrics.inc("latency.before_prompt_build.total.count");
+          metrics.setMax("latency.before_prompt_build.total.max_ms", totalLatencyMs);
 
           await debugLog("before_prompt_build:assembled", {
             sessionKey,
@@ -676,6 +931,11 @@ const plugin = {
       api.on("gateway_stop", async () => {
         heartbeat.stop();
         if (kgBatcher) await kgBatcher.stop();
+        if (hotCacheInterval !== null) {
+          clearInterval(hotCacheInterval);
+          hotCacheInterval = null;
+        }
+        if (cfg.hotCache.enabled) await flushHotCache();
         await mcp.stop();
       });
     }

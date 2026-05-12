@@ -17,7 +17,8 @@
         "properties": {
           "capacity": { "type": "number", "default": 200 },
           "ttlMs": { "type": "number", "default": 300000 },
-          "kgTtlMs": { "type": "number", "default": 600000 }
+          "kgTtlMs": { "type": "number", "default": 600000 },
+          "bundleTtlMs": { "type": "number", "default": 180000, "description": "TTL (ms) for the intent-keyed recall bundle cache. Defaults to 180 000 (3 min). Same-intent follow-up prompts reuse cached bundles within this window." }
         }
       },
       "injection": {
@@ -33,7 +34,8 @@
             "description": "Extra entity names always considered for KG lookup (appended to the built-in list)."
           },
           "identityMaxTokens": { "type": "number", "default": 150, "description": "Token budget for the compacted identity block." },
-          "rawIdentity": { "type": "boolean", "default": false, "description": "Inject raw SOUL.md/IDENTITY.md text instead of the compacted form." }
+          "rawIdentity": { "type": "boolean", "default": false, "description": "Inject raw SOUL.md/IDENTITY.md text instead of the compacted form." },
+          "fastRaceMs": { "type": "number", "default": 50, "description": "Window (ms) to wait for a precomputed recall bundle before falling back to cheap mode. Long enough to use an already-resolved promise; short enough to never block on a fresh MCP round-trip." }
         }
       },
       "tiers": {
@@ -87,6 +89,15 @@
             "items": { "type": "string" },
             "description": "Filesystem roots the memory runtime is allowed to read. Supports ~ expansion. Default: [~/.mempalace, ~/.openclaw/workspace]"
           }
+        }
+      },
+      "hotCache": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true, "description": "Enable persisting the hot recall bundle cache to disk across restarts." },
+          "path": { "type": "string", "description": "Path for the hot cache snapshot file. Supports ~ expansion. Default: ~/.mempalace/remempalace/hot-cache.json" },
+          "maxEntries": { "type": "number", "default": 50, "description": "Maximum number of bundle cache entries to persist." },
+          "flushIntervalMs": { "type": "number", "default": 60000, "description": "How often (ms) to flush the hot cache to disk during a session." }
         }
       }
     }

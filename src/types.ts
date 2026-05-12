@@ -51,6 +51,7 @@ export interface RemempalaceConfig {
     capacity: number;
     ttlMs: number;
     kgTtlMs: number;
+    bundleTtlMs: number;
   };
   injection: {
     maxTokens: number;
@@ -60,6 +61,7 @@ export interface RemempalaceConfig {
     knownEntities: string[];
     identityMaxTokens: number;
     rawIdentity: boolean;
+    fastRaceMs: number;
   };
   tiers: {
     l1Threshold: number;
@@ -91,6 +93,12 @@ export interface RemempalaceConfig {
   };
   memoryRuntime: {
     allowedReadRoots: string[];
+  };
+  hotCache: {
+    enabled: boolean;
+    path: string;
+    maxEntries: number;
+    flushIntervalMs: number;
   };
 }
 

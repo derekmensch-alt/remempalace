@@ -52,6 +52,22 @@ describe("McpMemPalaceRepository", () => {
     expect(results).toEqual([{ text: "hit", wing: "w", room: "r", similarity: 0.8 }]);
   });
 
+  it("passes memory search timeout through the adapter without exposing raw MCP schemas", async () => {
+    const callTool = vi.fn().mockResolvedValue({ results: [] });
+    const repository = new McpMemPalaceRepository(makeMcp({ callTool }));
+
+    await repository.searchMemory({ query: "openclaw", limit: 3, timeoutMs: 500 });
+
+    expect(callTool).toHaveBeenCalledWith(
+      "mempalace_search",
+      {
+        query: "openclaw",
+        limit: 3,
+      },
+      500,
+    );
+  });
+
   it("maps KG timeline reads to the current MemPalace MCP schema", async () => {
     const callTool = vi.fn().mockResolvedValue([{ date: "2026-04-15", fact: "completed X" }]);
     const repository = new McpMemPalaceRepository(makeMcp({ callTool }));
@@ -78,6 +94,21 @@ describe("McpMemPalaceRepository", () => {
     expect(result).toEqual({
       facts: [{ subject: "Derek", predicate: "uses", object: "OpenClaw" }],
     });
+  });
+
+  it("passes KG entity query timeout through the adapter without exposing raw MCP schemas", async () => {
+    const callTool = vi.fn().mockResolvedValue({ facts: [] });
+    const repository = new McpMemPalaceRepository(makeMcp({ callTool }));
+
+    await repository.queryKgEntity({ entity: "Derek", timeoutMs: 500 });
+
+    expect(callTool).toHaveBeenCalledWith(
+      "mempalace_kg_query",
+      {
+        entity: "Derek",
+      },
+      500,
+    );
   });
 
   it("maps KG fact adds to the current MemPalace MCP schema", async () => {
@@ -347,5 +378,37 @@ describe("McpMemPalaceRepository", () => {
     });
     expect(repository.canPersistDiary).toBe(false);
     expect(repository.diaryPersistenceState).toBe("write-ok-unverified");
+  });
+
+  it("uses caller-provided timeout for persistence probe write/read", async () => {
+    let probeEntry = "";
+    const callTool = vi.fn().mockImplementation((name: string, args: Record<string, unknown>) => {
+      if (name === "mempalace_diary_write") {
+        probeEntry = String(args.entry);
+        return Promise.resolve({ success: true });
+      }
+      if (name === "mempalace_diary_read") {
+        return Promise.resolve({ entries: [{ content: probeEntry, topic: "health-probe" }] });
+      }
+      return Promise.resolve({});
+    });
+    const repository = new McpMemPalaceRepository({
+      hasDiaryWrite: true,
+      hasDiaryRead: true,
+      callTool,
+    });
+
+    await repository.verifyDiaryPersistence({ timeoutMs: 250 });
+
+    expect(callTool).toHaveBeenCalledWith(
+      "mempalace_diary_write",
+      expect.objectContaining({ agent_name: "remempalace-health", topic: "health-probe" }),
+      250,
+    );
+    expect(callTool).toHaveBeenCalledWith(
+      "mempalace_diary_read",
+      expect.objectContaining({ agent_name: "remempalace-health", topic: "health-probe", last_n: 20 }),
+      250,
+    );
   });
 });

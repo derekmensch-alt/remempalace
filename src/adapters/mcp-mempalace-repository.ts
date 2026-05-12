@@ -1,4 +1,5 @@
 import type {
+  DiaryPersistenceProbeRequest,
   DiaryPersistenceProbeResult,
   DiaryPersistenceState,
   DiaryReadRequest,
@@ -66,10 +67,18 @@ export class McpMemPalaceRepository implements MemPalaceRepository {
 
   async searchMemory(request: MemorySearchRequest): Promise<SearchResult[]> {
     try {
-      const raw = await this.mcp.callTool<{ results?: SearchResult[] }>("mempalace_search", {
+      const args = {
         query: request.query,
         limit: request.limit,
-      });
+      };
+      const raw =
+        request.timeoutMs === undefined
+          ? await this.mcp.callTool<{ results?: SearchResult[] }>("mempalace_search", args)
+          : await this.mcp.callTool<{ results?: SearchResult[] }>(
+              "mempalace_search",
+              args,
+              request.timeoutMs,
+            );
       return raw.results ?? [];
     } catch (err) {
       throw mapMcpToolError("mempalace_search", err);
@@ -78,9 +87,12 @@ export class McpMemPalaceRepository implements MemPalaceRepository {
 
   async queryKgEntity(request: KgEntityQueryRequest): Promise<unknown> {
     try {
-      return await this.mcp.callTool<unknown>("mempalace_kg_query", {
+      const args = {
         entity: request.entity,
-      });
+      };
+      return request.timeoutMs === undefined
+        ? await this.mcp.callTool<unknown>("mempalace_kg_query", args)
+        : await this.mcp.callTool<unknown>("mempalace_kg_query", args, request.timeoutMs);
     } catch (err) {
       throw mapMcpToolError("mempalace_kg_query", err);
     }
@@ -156,7 +168,7 @@ export class McpMemPalaceRepository implements MemPalaceRepository {
     }
   }
 
-  async verifyDiaryPersistence(): Promise<DiaryPersistenceProbeResult> {
+  async verifyDiaryPersistence(request?: DiaryPersistenceProbeRequest): Promise<DiaryPersistenceProbeResult> {
     if (!this.canWriteDiary || !this.canReadDiary) {
       this.persistenceState = "unavailable";
       const missing = !this.canWriteDiary ? "mempalace_diary_write" : "mempalace_diary_read";
@@ -174,8 +186,9 @@ export class McpMemPalaceRepository implements MemPalaceRepository {
       .toString(16)
       .slice(2)}`;
 
+    const timeoutMs = request?.timeoutMs ?? this.diaryProbeTimeoutMs;
     try {
-      await this.writeDiary({ agentName, entry, topic, timeoutMs: this.diaryProbeTimeoutMs });
+      await this.writeDiary({ agentName, entry, topic, timeoutMs });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       return { state: this.persistenceState, verified: false, error };
@@ -188,7 +201,7 @@ export class McpMemPalaceRepository implements MemPalaceRepository {
         agentName,
         lastN: 20,
         topic,
-        timeoutMs: this.diaryProbeTimeoutMs,
+        timeoutMs,
       });
       if (diaryReadContains(read, entry, topic)) {
         this.persistenceState = "persistent";

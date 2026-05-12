@@ -3,6 +3,8 @@ import { join } from "node:path";
 import type { Metrics } from "./metrics.js";
 import type { DiaryPersistenceState, MemPalaceRepository } from "./ports/mempalace-repository.js";
 
+const DIARY_IO_TIMEOUT_MS = 500;
+
 export interface DiaryEntry {
   wing: string;
   room: string;
@@ -114,7 +116,7 @@ export class DiaryReconciler {
     }
 
     if (repository.verifyDiaryPersistence) {
-      const probe = await repository.verifyDiaryPersistence();
+      const probe = await repository.verifyDiaryPersistence({ timeoutMs: DIARY_IO_TIMEOUT_MS });
       if (!probe.verified || !repository.canPersistDiary) {
         this.lastReplayError = probe.error ?? `diary persistence probe did not verify (${probe.state})`;
         const result: ReplayResult = { attempted: 0, succeeded: 0, failed: 0, skipped: true, at };
@@ -162,7 +164,7 @@ export class DiaryReconciler {
           agentName: p.entry.wing ?? "remempalace",
           entry: p.entry.content,
           topic: p.entry.room ?? "session",
-          timeoutMs: 500,
+          timeoutMs: DIARY_IO_TIMEOUT_MS,
         });
         succeeded++;
         this.opts.metrics?.inc("diary.replay.succeeded");

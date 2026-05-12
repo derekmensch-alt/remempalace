@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildDefaultRuntimeDisclosure,
   PromptInjectionService,
 } from "../src/services/prompt-injection-service.js";
+import { countTokens } from "../src/token-counter.js";
 
 describe("PromptInjectionService", () => {
   it("builds the default runtime disclosure", () => {
@@ -142,6 +143,64 @@ describe("PromptInjectionService", () => {
       "- 2026-05-10: remempalace Phase 2 completed",
       "",
     ]);
+  });
+
+  it("computes overhead tokens covering runtime disclosure and memory context header", () => {
+    const service = new PromptInjectionService();
+    const overhead = service.computeOverheadTokens({ identityIncluded: false });
+    const expected =
+      countTokens(service.buildRuntimeDisclosure().join("\n")) +
+      countTokens("## Memory Context (remempalace)\n\n\n");
+    expect(overhead).toBe(expected);
+  });
+
+  it("adds identity header overhead when identityIncluded is true", () => {
+    const service = new PromptInjectionService();
+    const withoutIdentity = service.computeOverheadTokens({ identityIncluded: false });
+    const withIdentity = service.computeOverheadTokens({ identityIncluded: true });
+    expect(withIdentity).toBeGreaterThan(withoutIdentity);
+  });
+
+  it("caches static overhead token costs per service instance", () => {
+    const runtimeDisclosure = vi.fn(() => [
+      "## Active Memory Plugin (remempalace)",
+      "",
+      "memory plugin active",
+      "",
+    ]);
+    const service = new PromptInjectionService({ runtimeDisclosure });
+
+    const withoutIdentity = service.computeOverheadTokens({ identityIncluded: false });
+    const withIdentity = service.computeOverheadTokens({ identityIncluded: true });
+    const withoutIdentityAgain = service.computeOverheadTokens({ identityIncluded: false });
+
+    expect(withIdentity).toBeGreaterThan(withoutIdentity);
+    expect(withoutIdentityAgain).toBe(withoutIdentity);
+    expect(runtimeDisclosure).toHaveBeenCalledTimes(1);
+  });
+
+  it("static overhead conservatively bounds rendered recall context without identity", () => {
+    const service = new PromptInjectionService();
+    const memoryLines = ["KG FACTS (source=remempalace KG, authoritative, newest first):", "- A:p=1"];
+    const staticPlusContent =
+      service.computeOverheadTokens({ identityIncluded: false }) +
+      countTokens(memoryLines.join("\n"));
+    const rendered = service.buildRecallContext({ identity: "", memoryLines }).join("\n");
+
+    expect(staticPlusContent).toBeGreaterThanOrEqual(countTokens(rendered));
+  });
+
+  it("static overhead conservatively bounds rendered recall context with identity", () => {
+    const service = new PromptInjectionService();
+    const identity = "Derek prefers concise handoff notes.";
+    const memoryLines = ["KG FACTS (source=remempalace KG, authoritative, newest first):", "- A:p=1"];
+    const staticPlusContent =
+      service.computeOverheadTokens({ identityIncluded: true }) +
+      countTokens(identity) +
+      countTokens(memoryLines.join("\n"));
+    const rendered = service.buildRecallContext({ identity, memoryLines }).join("\n");
+
+    expect(staticPlusContent).toBeGreaterThanOrEqual(countTokens(rendered));
   });
 
   it("truncates long diary content before injection", () => {

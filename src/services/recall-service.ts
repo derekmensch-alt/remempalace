@@ -5,7 +5,7 @@ export interface RecallRouter {
   readBundle(
     query: string,
     limit: number,
-    opts?: { entityCandidates?: string[] },
+    opts?: { entityCandidates?: string[]; maxKgEntityQueries?: number; includeSearch?: boolean },
   ): Promise<ReadBundle>;
 }
 
@@ -14,7 +14,7 @@ export interface RecallResult {
   bundle: ReadBundle;
 }
 
-export type RecallMode = "cheap" | "full";
+export type RecallMode = "cheap" | "cheap+kg1" | "full";
 
 export interface CheapRecallInput {
   prompt: string;
@@ -52,6 +52,9 @@ export class RecallService {
     const trimmed = prompt.trim();
     if (!trimmed) return "cheap";
     if (/[?]/.test(trimmed)) return "full";
+    if (candidates.length > 0 && isContinuationPrompt(normalizePrompt(trimmed))) {
+      return "cheap+kg1";
+    }
     if (candidates.length > 0) return "full";
     if (isPriorContextPrompt(normalizePrompt(trimmed))) return "full";
     return "cheap";
@@ -65,6 +68,16 @@ export class RecallService {
   ): Promise<ReadBundle> {
     if ((opts.mode ?? "full") === "cheap") {
       return Promise.resolve({ searchResults: [], kgResults: { facts: [] } });
+    }
+    if (opts.mode === "cheap+kg1") {
+      if (candidates.length === 0) {
+        return Promise.resolve({ searchResults: [], kgResults: { facts: [] } });
+      }
+      return this.router.readBundle(prompt, limit, {
+        entityCandidates: candidates,
+        includeSearch: false,
+        maxKgEntityQueries: 1,
+      });
     }
     return this.router.readBundle(prompt, limit, { entityCandidates: candidates });
   }
@@ -111,6 +124,12 @@ function isToolFollowUpChatter(text: string): boolean {
 
 function isPriorContextPrompt(text: string): boolean {
   return /\b(remember|recall|remind me|what did|what was|last time|last session|previous|earlier|before|history|timeline)\b/.test(
+    text,
+  );
+}
+
+function isContinuationPrompt(text: string): boolean {
+  return /\b(continue|next|next step|next steps|proceed|pick up|keep going|carry on)\b/.test(
     text,
   );
 }

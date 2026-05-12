@@ -37,6 +37,26 @@ function formatCacheLine(label: string, s: CacheStats): string {
   return `${label}: ${s.hits} hits, ${s.misses} misses, ${s.size} entries`;
 }
 
+function formatLatencySummary(metrics: Record<string, number> | undefined): string[] {
+  if (!metrics) return [];
+  const stages = ["init", "fetch", "format", "total"] as const;
+  const lines: string[] = [];
+  for (const stage of stages) {
+    const total = metrics[`latency.before_prompt_build.${stage}.ms_total`];
+    const count = metrics[`latency.before_prompt_build.${stage}.count`];
+    if (!total || !count) continue;
+    const avgMs = total / count;
+    const maxMs =
+      stage === "total" ? metrics["latency.before_prompt_build.total.max_ms"] : undefined;
+    lines.push(
+      stage === "total" && Number.isFinite(maxMs)
+        ? `  ${stage}: avg=${avgMs.toFixed(1)}ms max=${(maxMs ?? 0).toFixed(1)}ms n=${count}`
+        : `  ${stage}: avg=${avgMs.toFixed(1)}ms n=${count}`,
+    );
+  }
+  return lines;
+}
+
 export function buildStatusReport(input: StatusReportInput): string {
   const lines: string[] = ["remempalace status", ""];
 
@@ -92,6 +112,13 @@ export function buildStatusReport(input: StatusReportInput): string {
   }
 
   if (input.metrics) {
+    const latencyLines = formatLatencySummary(input.metrics);
+    if (latencyLines.length > 0) {
+      lines.push("");
+      lines.push("Latency:");
+      lines.push(...latencyLines);
+    }
+
     lines.push("");
     lines.push("Metrics:");
     const keys = Object.keys(input.metrics).sort();

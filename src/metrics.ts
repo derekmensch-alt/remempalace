@@ -10,6 +10,12 @@ export class Metrics {
     return Object.fromEntries(this.counters);
   }
 
+  setMax(name: string, n: number): void {
+    if (!Number.isFinite(n)) return;
+    const prev = this.counters.get(name);
+    if (prev === undefined || n > prev) this.counters.set(name, n);
+  }
+
   reset(): void {
     this.counters.clear();
   }

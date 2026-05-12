@@ -147,6 +147,7 @@ describe("DiaryService", () => {
     await new Promise((r) => setImmediate(r));
 
     expect(probe).toEqual({ state: "persistent", verified: true });
+    expect(repository.verifyDiaryPersistence).toHaveBeenCalledWith({ timeoutMs: 500 });
     expect(onProbeResult).toHaveBeenCalledWith({ state: "persistent", verified: true });
     expect(replay).toHaveBeenCalledOnce();
     expect(onReplayResult).toHaveBeenCalledWith({ attempted: 1, succeeded: 1, failed: 0, at: 0 });

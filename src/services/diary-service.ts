@@ -7,6 +7,8 @@ import type {
   MemPalaceRepository,
 } from "../ports/mempalace-repository.js";
 
+const DIARY_IO_TIMEOUT_MS = 500;
+
 export interface DiaryStatus {
   state: ReturnType<typeof computeDiaryHealth>;
   persistenceState?: DiaryPersistenceState;
@@ -48,7 +50,7 @@ export class DiaryService {
 
     let probe: DiaryPersistenceProbeResult;
     try {
-      probe = await this.opts.repository.verifyDiaryPersistence();
+      probe = await this.opts.repository.verifyDiaryPersistence({ timeoutMs: DIARY_IO_TIMEOUT_MS });
     } catch (err) {
       options.onProbeError?.(err instanceof Error ? err : new Error(String(err)));
       return null;
@@ -90,7 +92,7 @@ export class DiaryService {
           agentName: "remempalace",
           entry: summary,
           topic: "session",
-          timeoutMs: 500,
+          timeoutMs: DIARY_IO_TIMEOUT_MS,
         })
         .then(() => this.opts.metrics?.inc("diary.write.mcp_succeeded"))
         .catch(() => {
