@@ -65,11 +65,11 @@ describe("deriveHealthLabel", () => {
     expect(deriveHealthLabel(input)).toBe("degraded");
   });
 
-  it("returns degraded when any overrun counter is positive", () => {
+  it("keeps health healthy when only advisory latency overruns are present", () => {
     const input = baseInput({
       metrics: { "latency.before_prompt_build.init.overrun": 2 },
     });
-    expect(deriveHealthLabel(input)).toBe("degraded");
+    expect(deriveHealthLabel(input)).toBe("healthy");
   });
 
   it("returns healthy when all overrun counters are zero", () => {
