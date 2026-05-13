@@ -4,19 +4,32 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
+// McpLifecycle mock — no callTool; lifecycle only.
 interface MockMcp {
-  callTool: ReturnType<typeof vi.fn>;
   isReady: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
 }
 
+// Full MemPalaceRepository mock (only methods used by the runtime need real impls).
 interface MockRepository {
   searchMemory: ReturnType<typeof vi.fn>;
+  canWriteDiary: boolean;
+  canReadDiary: boolean;
+  canInvalidateKg: boolean;
+  canPersistDiary: boolean;
+  diaryPersistenceState: string;
+  getPalaceStatus: ReturnType<typeof vi.fn>;
+  queryKgEntity: ReturnType<typeof vi.fn>;
+  addKgFact: ReturnType<typeof vi.fn>;
+  invalidateKgFact: ReturnType<typeof vi.fn>;
+  readKgTimeline: ReturnType<typeof vi.fn>;
+  writeDiary: ReturnType<typeof vi.fn>;
+  readDiary: ReturnType<typeof vi.fn>;
+  verifyDiaryPersistence: ReturnType<typeof vi.fn>;
 }
 
 function makeMcp(overrides: Partial<MockMcp> = {}): MockMcp {
   return {
-    callTool: vi.fn().mockResolvedValue({ results: [] }),
     isReady: vi.fn().mockReturnValue(true),
     stop: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -26,6 +39,19 @@ function makeMcp(overrides: Partial<MockMcp> = {}): MockMcp {
 function makeRepository(overrides: Partial<MockRepository> = {}): MockRepository {
   return {
     searchMemory: vi.fn().mockResolvedValue([]),
+    canWriteDiary: true,
+    canReadDiary: true,
+    canInvalidateKg: true,
+    canPersistDiary: false,
+    diaryPersistenceState: "tool-present",
+    getPalaceStatus: vi.fn().mockResolvedValue({}),
+    queryKgEntity: vi.fn().mockResolvedValue({}),
+    addKgFact: vi.fn().mockResolvedValue({}),
+    invalidateKgFact: vi.fn().mockResolvedValue({}),
+    readKgTimeline: vi.fn().mockResolvedValue([]),
+    writeDiary: vi.fn().mockResolvedValue({}),
+    readDiary: vi.fn().mockResolvedValue([]),
+    verifyDiaryPersistence: vi.fn().mockResolvedValue({ state: "tool-present", verified: false }),
     ...overrides,
   };
 }
@@ -230,16 +256,17 @@ describe("readFile sandbox", () => {
   let allowedRoot: string;
   let runtime: MempalaceMemoryRuntime;
 
-  function makeSandboxedRuntime(allowedReadRoots: string[]): MempalaceMemoryRuntime {
-    const mcp = {
-      callTool: vi.fn().mockResolvedValue({ results: [] }),
-      isReady: vi.fn().mockReturnValue(true),
-    };
+  function makeSandboxedRuntime(
+    allowedReadRoots: string[],
+    allowedWriteRoots: string[] = [],
+  ): MempalaceMemoryRuntime {
+    const mcp = makeMcp();
     return new MempalaceMemoryRuntime({
       mcp: mcp as never,
       repository: makeRepository() as never,
       similarityThreshold: 0.25,
       allowedReadRoots,
+      allowedWriteRoots,
     });
   }
 
@@ -478,5 +505,146 @@ describe("readFile sandbox", () => {
     );
     expect(matchingCall).toBeDefined();
     warnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// writeFile write-safety tests
+// ---------------------------------------------------------------------------
+describe("writeFile sandbox", () => {
+  let tmpDir: string;
+  let allowedWriteRoot: string;
+
+  function makeWriteRuntime(
+    allowedReadRoots: string[],
+    allowedWriteRoots: string[],
+  ): MempalaceMemoryRuntime {
+    return new MempalaceMemoryRuntime({
+      mcp: makeMcp() as never,
+      repository: makeRepository() as never,
+      similarityThreshold: 0.25,
+      allowedReadRoots,
+      allowedWriteRoots,
+    });
+  }
+
+  async function getManager(rt: MempalaceMemoryRuntime) {
+    const { manager } = await rt.getMemorySearchManager({ cfg: {} as never, agentId: "test" });
+    return manager!;
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "remempalace-write-test-"));
+    allowedWriteRoot = path.join(tmpDir, "allowed-write");
+    fs.mkdirSync(allowedWriteRoot, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("rejects write when allowedWriteRoots is empty (default deny-all)", async () => {
+    const rt = makeWriteRuntime([tmpDir], []);
+    const mgr = await getManager(rt);
+    const result = await mgr.writeFile({
+      relPath: path.join(allowedWriteRoot, "out.txt"),
+      content: "hello",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/WriteRejected|not in allowed write roots/i);
+  });
+
+  it("rejects write to path outside allowed write roots", async () => {
+    const rt = makeWriteRuntime([tmpDir], [allowedWriteRoot]);
+    const mgr = await getManager(rt);
+    const outsidePath = path.join(tmpDir, "outside.txt");
+    const result = await mgr.writeFile({ relPath: outsidePath, content: "evil" });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/WriteRejected|not in allowed write roots/i);
+    // Must not have written the file
+    expect(fs.existsSync(outsidePath)).toBe(false);
+  });
+
+  it("accepts write to path inside allowed write root", async () => {
+    const rt = makeWriteRuntime([tmpDir], [allowedWriteRoot]);
+    const mgr = await getManager(rt);
+    const targetFile = path.join(allowedWriteRoot, "result.txt");
+    const result = await mgr.writeFile({ relPath: targetFile, content: "success content" });
+
+    expect(result.ok).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("success content");
+  });
+
+  it("rejects write with path traversal escaping allowed write root", async () => {
+    const rt = makeWriteRuntime([tmpDir], [allowedWriteRoot]);
+    const mgr = await getManager(rt);
+    const traversal = path.join(allowedWriteRoot, "..", "escape.txt");
+    const result = await mgr.writeFile({ relPath: traversal, content: "escaped" });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/WriteRejected|not in allowed write roots/i);
+    expect(fs.existsSync(path.join(tmpDir, "escape.txt"))).toBe(false);
+  });
+
+  it("rejects write to sibling directory with shared prefix (prefix-confusion guard)", async () => {
+    const evilDir = allowedWriteRoot + "-evil";
+    fs.mkdirSync(evilDir, { recursive: true });
+    const rt = makeWriteRuntime([tmpDir], [allowedWriteRoot]);
+    const mgr = await getManager(rt);
+    const evilFile = path.join(evilDir, "secret.txt");
+    const result = await mgr.writeFile({ relPath: evilFile, content: "evil" });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/WriteRejected|not in allowed write roots/i);
+    expect(fs.existsSync(evilFile)).toBe(false);
+  });
+
+  it("returns write error code on fs failure inside allowed root", async () => {
+    const rt = makeWriteRuntime([tmpDir], [allowedWriteRoot]);
+    const mgr = await getManager(rt);
+    const targetFile = path.join(allowedWriteRoot, "fail.txt");
+
+    const { promises: fsPromises } = await import("node:fs");
+    const injected: NodeJS.ErrnoException = Object.assign(
+      new Error(`EACCES: permission denied, open '${targetFile}'`),
+      { code: "EACCES" },
+    );
+    const spy = vi.spyOn(fsPromises, "writeFile").mockRejectedValueOnce(injected);
+    const result = await mgr.writeFile({ relPath: targetFile, content: "x" });
+    spy.mockRestore();
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("cannot write file: EACCES");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Port boundary: search goes through the repository, no callTool in runtime
+// ---------------------------------------------------------------------------
+describe("search routes through repository port", () => {
+  it("search() calls repository.searchMemory and does not use callTool", async () => {
+    // The mock repository has no callTool — if the runtime tried to call it,
+    // this test would throw. Successful completion proves the port boundary.
+    const repository = makeRepository({
+      searchMemory: vi.fn().mockResolvedValue([
+        { text: "fact from port", wing: "w", room: "r", similarity: 0.9 },
+      ]),
+    });
+    const mcp = makeMcp();
+    const runtime = new MempalaceMemoryRuntime({
+      mcp: mcp as never,
+      repository: repository as never,
+      similarityThreshold: 0.25,
+    });
+
+    const { manager } = await runtime.getMemorySearchManager({ cfg: {} as never, agentId: "x" });
+    const results = await manager!.search("test query", { maxResults: 3 });
+
+    expect(repository.searchMemory).toHaveBeenCalledWith({ query: "test query", limit: 3 });
+    expect(results).toHaveLength(1);
+    expect(results[0].snippet).toBe("fact from port");
   });
 });

@@ -61,7 +61,8 @@ export type MemPalaceRepositoryErrorCode =
   | "CapabilityMissing"
   | "ToolFailed"
   | "PersistenceUnverified"
-  | "BackendUnavailable";
+  | "BackendUnavailable"
+  | "WriteRejected";
 
 export class MemPalaceRepositoryError extends Error {
   constructor(
@@ -95,6 +96,12 @@ export class PersistenceUnverified extends MemPalaceRepositoryError {
 export class BackendUnavailable extends MemPalaceRepositoryError {
   constructor(cause?: unknown) {
     super("BackendUnavailable", "MemPalace backend unavailable", cause);
+  }
+}
+
+export class WriteRejected extends MemPalaceRepositoryError {
+  constructor(path: string) {
+    super("WriteRejected", `Write target not in allowed write roots: ${path}`);
   }
 }
 

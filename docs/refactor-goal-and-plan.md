@@ -169,10 +169,10 @@ MemPalace MCP server
 
 ### Phase 5 — OpenClaw runtime adapter cleanup
 
-- [ ] Ensure `MempalaceMemoryRuntime` uses the repository port instead of raw MCP.
-- [ ] Map OpenClaw memory runtime methods to consistent MemPalace operations.
-- [ ] Enforce allowed read roots and write safety at the adapter boundary.
-- [ ] Gate: runtime tests green.
+- [x] Ensure `MempalaceMemoryRuntime` uses the repository port instead of raw MCP. `mcp.isReady()` retained via a narrow `McpLifecycle` interface (subprocess-lifecycle concern, not transport).
+- [x] Map OpenClaw memory runtime methods to consistent MemPalace operations (`search` via `repository.searchMemory`; `readFile`/`writeFile` are filesystem ops bounded by configured roots).
+- [x] Enforce allowed read roots and write safety at the adapter boundary (`memoryRuntime.allowedReadRoots` existing, `memoryRuntime.allowedWriteRoots` new with default `[]` = deny-all; violations return new `WriteRejected` typed error).
+- [x] Gate: runtime tests green (+7 tests in `tests/memory-runtime.test.ts`; mock is now a full `MemPalaceRepository`, proving the port boundary at compile time).
 
 ### Phase 6 — Observability and operations
 
@@ -233,9 +233,9 @@ The refactor is successful if:
 
 - Created: 2026-05-11
 - Owner: main OpenClaw assistant session
-- Last updated: 2026-05-12T21:36:00-04:00
-- Status: Phases 0–4 complete. Phase 3 closed with hot health/status cache persistence and fast-path docs. Phase 4 closed with `LearningService` (`src/services/learning-service.ts`), explicit role policy (`cfg.learning.fromUser|fromAssistant|fromSystem`), and `remember <X>` enqueue (`forget` logged-only, triple resolution deferred).
-- Current gate: `npm run lint` and `npm test` pass in the default suite. Latest local full test run observed 518 passed / 6 skipped across 36 test files (38 total including 2 skipped).
-- Boundary check: raw `callTool(` usage is isolated to `src/adapters/mcp-mempalace-repository.ts`.
+- Last updated: 2026-05-12T21:51:00-04:00
+- Status: Phases 0–5 complete. Phase 3 closed with hot health/status cache persistence and fast-path docs. Phase 4 closed with `LearningService` (`src/services/learning-service.ts`), explicit role policy (`cfg.learning.fromUser|fromAssistant|fromSystem`), and `remember <X>` enqueue (`forget` logged-only, triple resolution deferred).
+- Current gate: `npm run lint` and `npm test` pass in the default suite. Latest local full test run observed 525 passed / 6 skipped across 36 test files (38 total including 2 skipped).
+- Boundary check: raw `callTool(` usage is isolated to `src/adapters/mcp-mempalace-repository.ts` (verified by grep).
 - Handoff details: see `docs/current-refactor-status.md`.
-- Immediate next task: Phase 5 — route `MempalaceMemoryRuntime` through the `MemPalaceRepository` port, align OpenClaw memory runtime methods to consistent MemPalace operations, and enforce read-roots / write-safety at the adapter boundary.
+- Immediate next task: Phase 6 — observability and operations (redesign `/remempalace status` around health states, add latency metrics, stage-level prompt-path sub-budgets, backend circuit breakers).

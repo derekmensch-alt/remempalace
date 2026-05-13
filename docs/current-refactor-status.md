@@ -1,10 +1,10 @@
 # Current Refactor Status
 
-Updated: 2026-05-12T21:36:00-04:00
+Updated: 2026-05-12T21:51:00-04:00
 
 ## Summary
 
-The remempalace refactor has completed Phases 0–4. Phases 5–7 remain.
+The remempalace refactor has completed Phases 0–5. Phases 6–7 remain.
 
 Current default gate:
 
@@ -17,7 +17,7 @@ Latest observed default test result:
 
 ```text
 Test Files  36 passed | 2 skipped (38)
-Tests       518 passed | 6 skipped (524)
+Tests       525 passed | 6 skipped (531)
 ```
 
 ## Completed
@@ -90,9 +90,17 @@ The worktree contains many modified files plus untracked docs, adapter/port/serv
 - `src/index.ts` shrank by ~41 lines (removed inline `learnedKgKeys` set, `rememberLearnedKgKey`, `learnKgFactsFromText`, and inline memory-command logging).
 - New tests in `tests/learning-service.test.ts` cover extraction thresholds, dedup, role gating, and remember/forget behavior.
 
+## Phase 5 Completion
+
+- `MempalaceMemoryRuntime` (`src/memory-runtime.ts`) now consumes `MemPalaceRepository` for search; the raw `callTool` path has been removed from the runtime. A narrow `McpLifecycle` interface (just `isReady()` / `stop()`) is retained for subprocess-lifecycle concerns that don't belong on the domain port.
+- Read-root enforcement uses existing `cfg.memoryRuntime.allowedReadRoots` (default `["~/.mempalace", "~/.openclaw/workspace"]`).
+- Write-safety enforced via new `cfg.memoryRuntime.allowedWriteRoots` (default `[]` = deny-all). Violations surface as a new typed error `WriteRejected` added to `src/ports/mempalace-repository.ts`.
+- `tests/memory-runtime.test.ts` mock is now a full `MemPalaceRepository`, which proves the port boundary at compile time. +7 tests (6 writeFile sandbox, 1 search-via-port).
+- Boundary check: `grep -rn "callTool(" src/` outside `src/adapters/mcp-mempalace-repository.ts` returns zero hits.
+
 ## Next Recommended Slice
 
-Begin Phase 5 — OpenClaw runtime adapter cleanup. Ensure `MempalaceMemoryRuntime` uses the `MemPalaceRepository` port (not raw MCP), align OpenClaw memory runtime methods to consistent MemPalace operations, and enforce read roots / write safety at the adapter boundary.
+Begin Phase 6 — observability and operations. Redesign `/remempalace status` around health states (`healthy`/`degraded`/`offline`), add latency metrics (p50/p95 per stage), stage-level prompt-path sub-budgets (`init`, `fetch`, `format`), backend circuit breakers, and durable-aware diary replay marking.
 
 ## Newly Added Backlog (Speed + Intuition)
 

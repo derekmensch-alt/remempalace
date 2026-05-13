@@ -58,6 +58,11 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
   },
   memoryRuntime: {
     allowedReadRoots: [`${homedir()}/.mempalace`, `${homedir()}/.openclaw/workspace`],
+    // Write safety: default empty — all writeFile calls are rejected unless the
+    // user explicitly enumerates allowed write roots. This is a defence-in-depth
+    // gate at the adapter boundary; MCP diary/KG writes are gated separately by
+    // the repository's canWriteDiary / canInvalidateKg capabilities.
+    allowedWriteRoots: [] as string[],
   },
   hotCache: {
     enabled: true,
@@ -80,10 +85,14 @@ export function mergeConfig(
   };
 
   const userRoots = user.memoryRuntime?.allowedReadRoots;
+  const userWriteRoots = user.memoryRuntime?.allowedWriteRoots;
   const memoryRuntime = {
     allowedReadRoots: userRoots
       ? userRoots.map(expandTilde)
       : DEFAULT_CONFIG.memoryRuntime.allowedReadRoots,
+    allowedWriteRoots: userWriteRoots
+      ? userWriteRoots.map(expandTilde)
+      : DEFAULT_CONFIG.memoryRuntime.allowedWriteRoots,
   };
 
   const mergedHotCache = { ...DEFAULT_CONFIG.hotCache, ...user.hotCache };

@@ -101,6 +101,8 @@ export interface RemempalaceConfig {
   };
   memoryRuntime: {
     allowedReadRoots: string[];
+    /** Paths the runtime may write to. Empty list (default) rejects all writes. */
+    allowedWriteRoots: string[];
   };
   hotCache: {
     enabled: boolean;

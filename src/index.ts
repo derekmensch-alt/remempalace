@@ -444,6 +444,7 @@ const plugin = {
       repository: mempalaceRepository,
       similarityThreshold: cfg.injection.similarityThreshold,
       allowedReadRoots: cfg.memoryRuntime.allowedReadRoots,
+      allowedWriteRoots: cfg.memoryRuntime.allowedWriteRoots,
       waitUntilReady: () => initPromise,
     });
 
