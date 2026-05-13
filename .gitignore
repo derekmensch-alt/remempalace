@@ -6,6 +6,7 @@ dist/
 coverage/
 .claude/
 .worktrees/
+docs/
 
 # Claude Code / Ruflo generated files
 CLAUDE.md
