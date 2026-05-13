@@ -1,10 +1,30 @@
-# remempalace
+<p align="center">
+  <img src="assets/remempalace-logo.png" alt="remempalace logo — a smart lobster memory mascot" width="220" />
+</p>
 
-A full-lifecycle memory plugin for OpenClaw, powered by MemPalace.
+<h1 align="center">remempalace</h1>
 
-**Status:** Release-candidate quality and in active OpenClaw testing. Verify with `npm run build`, `npm run lint`, and `npm test`.
+<p align="center">
+  <strong>A full-lifecycle memory plugin for OpenClaw, powered by MemPalace.</strong>
+</p>
 
-**Docs:** [Install](INSTALL.md) · [Configure](CONFIGURATION.md) · [Troubleshoot](TROUBLESHOOTING.md) · [Smoke test](docs/openclaw-smoke-test.md) · [Architecture](docs/architecture.md) · [Contribute](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+<p align="center">
+  <a href="INSTALL.md">Install</a> ·
+  <a href="CONFIGURATION.md">Configure</a> ·
+  <a href="TROUBLESHOOTING.md">Troubleshoot</a> ·
+  <a href="docs/openclaw-smoke-test.md">Smoke test</a> ·
+  <a href="docs/architecture.md">Architecture</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+<p align="center">
+  <img alt="Status: release candidate" src="https://img.shields.io/badge/status-release--candidate-orange" />
+  <img alt="OpenClaw memory plugin" src="https://img.shields.io/badge/OpenClaw-memory%20plugin-blue" />
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green" />
+</p>
+
+> **Status:** Release-candidate quality and in active OpenClaw testing. Verify with `npm run build`, `npm run lint`, and `npm test`.
 
 ## What it does
 
@@ -15,6 +35,16 @@ remempalace sits in OpenClaw's exclusive `memory` plugin slot and handles three 
 - **Recall** — pulls relevant KG facts and semantic memory from MemPalace before each turn.
 - **Learn** — captures conservative facts from the conversation and writes them to the knowledge graph.
 - **Persist** — writes session summaries to the MemPalace diary so future sessions can recover what happened.
+
+Its strengths are:
+
+- **Structured memory** — stores concise facts in a knowledge graph instead of relying only on long Markdown notes.
+- **Low prompt overhead** — injects a small ranked memory bundle rather than broad memory files.
+- **Fast repeated recall** — keeps a warm MCP connection and caches repeat searches, KG lookups, and recall bundles.
+- **Timeline awareness** — uses diary plus KG context for questions like “what happened yesterday?” or “what did we work on recently?”
+- **Two-way memory** — both recalls existing memory and writes conservative new facts over time.
+- **Operational visibility** — exposes health, diary persistence, latency, circuit breakers, and cache state through `/remempalace status`.
+- **Drop-in OpenClaw integration** — runs as the active memory plugin and exposes agent tools when supported by the host.
 
 It also exposes agent-callable tools for search, explicit notes, recent diary entries, and health/status when the OpenClaw host supports plugin tools.
 
