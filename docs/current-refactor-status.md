@@ -1,10 +1,12 @@
 # Current Refactor Status
 
-Updated: 2026-05-12T22:19:00-04:00
+Updated: 2026-05-13T01:12:00-04:00
 
 ## Summary
 
 The remempalace refactor has completed Phases 0–7 modulo three runtime-only checks that require a live OpenClaw session. Automated gates (`npm run build`, `npm run lint`, `npm test`, gated live-backend probe) are green.
+
+Current branch work added a namespaced agent-tool surface, forced full search for `remempalace_search`, a conservative `remempalace_remember`, and a status controller extraction that now owns live status text, cold-start hints, last-recall tracking, and slash-command registration.
 
 Current default gate:
 
@@ -16,8 +18,8 @@ npm test
 Latest observed default test result:
 
 ```text
-Test Files  38 passed | 2 skipped (40)
-Tests       578 passed | 6 skipped (584)
+Test Files  39 passed | 2 skipped (41)
+Tests       590 passed | 6 skipped (596)
 ```
 
 ## Completed
@@ -42,6 +44,8 @@ Tests       578 passed | 6 skipped (584)
 - Added a 1500ms shared prompt-path memory deadline around MCP init readiness, timeline reads, and full recall waits, including reused precompute promises, with graceful fallback on timeout.
 - Reduced KG fanout by capping per-prompt entity KG queries to 2 by default, deduplicating normalized aliases/roots, and filtering generic entities such as `project`, `this`, `it`, `memory`, and `OpenClaw`.
 - Added router/repository timeout propagation for search/KG reads and negative caching of empty fallback results on timeout/backend-unavailable read failures.
+- Added agent-facing tool registration in `src/agent-tools.ts` with namespaced tool names, a full-search agent query path, an explicit `remempalace_remember`, and no registered forget tool until deletion semantics exist.
+- Extracted live status assembly into `src/controllers/status-controller.ts`, including cold-start hints and slash-command registration.
 - Moved runtime disclosure, identity, memory, and timeline block assembly into `PromptInjectionService`.
 - Strengthened exactly-once hook/builder compatibility tests.
 - Added inline snapshots for source-labelled injection output.
@@ -150,3 +154,8 @@ Recommend running these once before merging PR #11 to main.
 - Make replay marking durable-aware: require post-write read verification or same-cycle successful persistence probe before marking JSONL entries replayed.
 - Precompute static token costs for fixed injection headers/prefixes to reduce repeated token counting in prompt path.
 - Persist a small hot recall/health cache across plugin restarts to reduce cold-start latency.
+- Split `src/index.ts` further into lifecycle, learning, and prompt-recall controllers so the register function becomes wiring-only.
+- Replace the current regex-only structured fact extractor with either narrower documented scope or a richer NER-backed path.
+- Implement KG deletion/invalidation semantics before exposing a real forget tool.
+- Add a file-fallback memory path for backend outages, using allowed read roots for recent notes and diary files.
+- Surface trust signals in `/remempalace status` for last learned, last rejected, and explicit-vs-extracted memory facts.
