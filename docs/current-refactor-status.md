@@ -1,25 +1,20 @@
 # Current Refactor Status
 
-Updated: 2026-05-13T15:30:00-04:00
+Updated: 2026-05-13T16:13:00-04:00
 
 ## Top Priority
 
-**RT-005 — Multi-register state sharing.** Status: **review** (implementation complete, awaiting live verification). Branch: `feat/RT-005-shared-runtime-state` (commit `e154b3a`, **not pushed**). New module `src/runtime-state.ts` owns the singleton runtime container keyed by `McpClient`; `register()` consumes it via `getRuntimeState()`. Workspace gates green: lint clean, build clean, `npm test` 601/6 (baseline 593/6, +8 from new tests, no regressions). Plan: `docs/superpowers/plans/2026-05-13-multi-register-state-sharing.md`.
-
-**Next action (resume here):**
-1. `git checkout feat/RT-005-shared-runtime-state` and `npm run build`.
-2. `openclaw gateway restart`, then ask the bot `/remempalace status` after one prompt — expect `diary_persistent: yes`, `diary.state: persistent` (or `fallback-active` if pending > 0), `last_replay` populated.
-3. Confirm exactly one `mempalace.mcp_server` child via `ps -ef`.
-4. If green, mark RT-005 `done` in `tasks/agentic-workflow.json` and merge to `main`.
+No P0 refactor task is currently held for live verification.
 
 ## Recently Landed (2026-05-13)
 
+- **RT-005 — Multi-register state sharing** (`233a79d` verification fix on branch `feat/RT-005-shared-runtime-state`). Shared runtime container is keyed by `McpClient`, so repeated `register()` calls observe the same repository, replay state, health slot, caches, and singleton init. Live gateway verification at 2026-05-13T20:12:13.312Z showed one MemPalace child, one MCP start, `health: healthy`, `diary_persistent: yes`, `diary.state: persistent`, `last_replay: 4/4 succeeded`, and populated search/KG caches.
 - **RT-006 — Configurable persistence probe timeout** (`diary.persistenceProbeTimeoutMs`, default 3000ms). Fixes the cold-start failure mode where the 500ms probe budget always timed out before MemPalace finished loading its embedding model, leaving `persistenceState` at `tool-present` and gating replay. Replay now drains pending JSONL entries on the first prompt after a gateway restart. Symptom signature documented in `TROUBLESHOOTING.md`.
 - **MemPalace ChromaDB palace recovery (one-off, install-specific).** Diagnosed silent ChromaDB write loss caused by a corrupt HNSW segment on this install (writes accepted but rows never queryable, `col.count()` flat). Resolved via `mempalace repair --mode from-sqlite --archive-existing`; archive at `~/.mempalace/palace.pre-rebuild-20260513-142746` is reversible. Symptom + recovery captured in `docs/upstream-issue-diary.md`.
 
 ## Summary
 
-The remempalace refactor has completed Phases 0–7 modulo three runtime-only checks that require a live OpenClaw session. Automated gates (`npm run build`, `npm run lint`, `npm test`, gated live-backend probe) are green.
+The remempalace refactor has completed Phases 0–7, including the RT-005 live OpenClaw gateway verification. Automated gates (`npm run build`, `npm run lint`, `npm test`, gated live-backend probe) are green.
 
 Current branch work added a namespaced agent-tool surface, forced full search for `remempalace_search`, a conservative `remempalace_remember`, and a status controller extraction that now owns live status text, cold-start hints, last-recall tracking, and slash-command registration.
 
@@ -33,8 +28,8 @@ npm test
 Latest observed default test result:
 
 ```text
-Test Files  39 passed | 2 skipped (41)
-Tests       590 passed | 6 skipped (596)
+Test Files  41 passed | 2 skipped (43)
+Tests       601 passed | 6 skipped (607)
 ```
 
 ## Completed

@@ -577,7 +577,7 @@
       "id": "RT-005",
       "title": "Share plugin state across repeated register() calls",
       "priority": "P0",
-      "status": "review",
+      "status": "done",
       "area": "runtime",
       "depends_on": [],
       "problem": "OpenClaw invokes plugin.register() multiple times per gateway process \u2014 once per registration mode (setup-only, setup-runtime, tool-discovery, discovery, full, cli-metadata; see loader-B-GXgDrk.js:3654-3692). McpClient.shared() already returns a singleton across register calls, but McpMemPalaceRepository, DiaryReconciler, search/KG caches, the init promise, and the health-probe state are constructed fresh per closure. Only one closure ever runs ensureInit; the others keep their persistenceState at the constructor default \"unavailable\" and serve agent-tool calls (notably remempalace_status) with stale state. Observed symptom: gateway log shows successful probe + replay (\"diary replay: 199/201 succeeded\") while /remempalace status simultaneously reports diary_persistent: no, last_replay: none, and caches: 0 entries. Recall, recent diary writes, and KG writes still work \u2014 they ride the shared McpClient \u2014 but the durable-replay/status surface is incoherent.",
@@ -611,19 +611,24 @@
         "Implementation commit e154b3a: src/runtime-state.ts (new) holds metrics/breakers/caches/repository/router/diary services/reconciler/kgBatcher/learningService/heartbeat/memoryRuntime/health slot/per-session maps + singleton ensureInit. Keyed by McpClient instance. src/index.ts register() now consumes getRuntimeState(); only per-closure objects are StatusController, PromptInjectionService, BudgetManager, and agent-tool wiring.",
         "Workspace verification: npm run lint clean; npm run build clean; npm test 601 passed / 6 skipped across 41 files (baseline 593+6, +8 from new tests, no regressions).",
         "Tests: tests/runtime-state.test.ts (new) covers identity-equality on repeated getRuntimeState, first-call cfg wins, distinct McpClient -> distinct state, reset clears cache, mcp.start invoked once, shared health slot observable. tests/lifecycle.test.ts gained RT-005 regression tests (status observability across closures, single mcp.start across two register calls); afterEach now calls resetRuntimeStateForTests.",
-        "Status: review \u2014 not pushed to origin, waiting on maintainer sign-off + live gateway verification."
+        "Status: done \u2014 live gateway verification passed after final advisory-latency health fix.",
+        "Followup completed: live verification after openclaw gateway restart and one full-recall bot prompt (`what do you remember about remempalace?`) showed the status closure now shares the initialized runtime state.",
+        "Followup completed: process check after live prompt showed exactly one gateway-owned `/home/derek/.venvs/mempalace/bin/python -m mempalace.mcp_server` child under one openclaw gateway process.",
+        "Live verification 2026-05-13T20:12:13.312Z: verbatim /remempalace status showed `remempalace status \u2014 healthy`, `diary_persistent: yes`, `diary.state: persistent`, `last_replay: 4/4 succeeded, 0 failed`, `search: 0 hits, 5 misses, 5 entries`, and `kg: 4 hits, 3 misses, 3 entries`; gateway log showed one `MCP client started` line and no `persistence unverified` line for the run.",
+        "Verification fix commit 233a79d: advisory latency overruns remain visible in status latency/log telemetry but no longer degrade an otherwise healthy persistent backend.",
+        "Final workspace verification after the advisory-latency health fix: focused status vitest passed 35 tests; npm run lint clean; npm run build clean; npm test 601 passed / 6 skipped across 43 files."
       ],
       "changed_files": [
         "src/runtime-state.ts",
         "src/index.ts",
         "tests/runtime-state.test.ts",
-        "tests/lifecycle.test.ts"
+        "tests/lifecycle.test.ts",
+        "src/status-command.ts",
+        "tests/status-command.test.ts",
+        "CONFIGURATION.md",
+        "docs/openclaw-smoke-test.md"
       ],
-      "followups": [
-        "Live verification: openclaw gateway restart; ask bot /remempalace status and confirm diary_persistent: yes after one before_prompt_build event.",
-        "Confirm exactly one mempalace.mcp_server child via ps -ef.",
-        "If green, mark RT-005 done and merge feat/RT-005-shared-runtime-state to main."
-      ],
+      "followups": [],
       "active_agent": null
     },
     {
