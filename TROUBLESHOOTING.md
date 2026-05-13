@@ -563,13 +563,11 @@ caches: 0 hits, 0 misses, 0 entries
 
 with `mcp_ready: yes` and capability flags (`diary_write`, `diary_read`, `kg_writable`) all `yes`.
 
-**Cause:** OpenClaw calls `plugin.register()` multiple times in the same gateway process — once per registration mode (`setup-only`, `setup-runtime`, `tool-discovery`, `discovery`, `full`, `cli-metadata`). Each call constructs a fresh closure with its own `McpMemPalaceRepository`, `DiaryReconciler`, caches, init promise, and health-probe state. `McpClient` is the only object that is shared across register calls today (via `McpClient.shared(pythonBin)`), which is why MCP readiness and capability flags stay consistent across closures. Everything else is per-closure: only the closure whose `before_prompt_build` fired first runs `ensureInit`, so the probe and replay land in *that* closure’s repository. The closure whose `registerTool` call is resolved when the agent invokes `remempalace_status` may be a different one, so it reads pristine state.
+**Cause:** Before RT-005, OpenClaw called `plugin.register()` multiple times in the same gateway process — once per registration mode (`setup-only`, `setup-runtime`, `tool-discovery`, `discovery`, `full`, `cli-metadata`). Each call constructed a fresh closure with its own `McpMemPalaceRepository`, `DiaryReconciler`, caches, init promise, and health-probe state. `McpClient` was the only object shared across register calls (via `McpClient.shared(pythonBin)`), so MCP readiness and capability flags stayed consistent while `/remempalace status` could still read pristine per-closure state.
 
-Recall, KG writes, and new diary writes still work — they all ride the shared `McpClient`. The mismatch is cosmetic from the user’s perspective, but it makes operational status untrustworthy and obscures real replay errors.
+**Status:** fixed in **RT-005**. The shared runtime container now lives in `src/runtime-state.ts` and is keyed by the shared `McpClient`, so the status tool, replay bookkeeping, caches, and health probe all observe the same runtime state across closures.
 
-**Status:** tracked as **RT-005** in `tasks/agentic-workflow.json` (P0). Design and acceptance criteria live in `docs/superpowers/plans/2026-05-13-multi-register-state-sharing.md`. The fix extends the `McpClient.shared` singleton pattern to the other stateful objects.
-
-**Until the fix lands, how to verify the real state:**
+**If you need to verify the live state on an older build or a mixed install, use:**
 
 1. Check the gateway log directly — it’s authoritative:
 
@@ -598,6 +596,8 @@ Recall, KG writes, and new diary writes still work — they all ride the shared 
    ```
 
    `True` / `True` means persistence is healthy regardless of what `remempalace_status` reports.
+
+On current builds, the live `/remempalace status` output should now match the gateway log once RT-005 and RT-006 are both present.
 
 ---
 

@@ -108,6 +108,8 @@ beforeEach(() => {
 afterEach(async () => {
   vi.restoreAllMocks();
   await McpClient.resetSharedForTests();
+  const { resetRuntimeStateForTests } = await import("../src/runtime-state.js");
+  await resetRuntimeStateForTests();
 });
 
 // ---------------------------------------------------------------------------
@@ -1260,5 +1262,77 @@ describe("before_prompt_build injection snapshots: budget regimes", () => {
       [w/r ★0.35] second hit content about project X [source=remempalace search, confidence=0.35]
       "
     `);
+  });
+});
+
+describe("RT-005: shared runtime state across multiple register() calls", () => {
+  it("a second register call's status tool reflects state from the first call's repository", async () => {
+    // Both register() calls share the same mockMcp (via spyOn'd McpClient.shared),
+    // so they must end up with the same RuntimeState and the same repository.
+    const plugin = await importPlugin();
+
+    const apiA = makeFakeApi();
+    const apiB = makeFakeApi();
+
+    plugin.register(apiA);
+    plugin.register(apiB);
+
+    // Both register calls should resolve to the same shared RuntimeState. The
+    // repository instance is the canonical witness; status tools registered on
+    // apiB must read through that same instance, so capability mutations made
+    // via apiA's emit path become visible to apiB's status tool.
+
+    // Drive init via apiA's before_prompt_build (only its handler is wired —
+    // apiB's was also registered but on a separate handlers map; both share
+    // the same RuntimeState.ensureInit).
+    await apiA.emit("before_prompt_build", { prompt: "test prompt for init" }, {});
+
+    // Now mutate the shared repository's capability state directly. Both
+    // status controllers should observe the change because they read through
+    // the same McpMemPalaceRepository instance held by the shared RuntimeState.
+    // Status tool from apiB:
+    const statusToolB = registeredTools(apiB).find((t) => t.name === "remempalace_status");
+    expect(statusToolB).toBeDefined();
+    const statusToolA = registeredTools(apiA).find((t) => t.name === "remempalace_status");
+    expect(statusToolA).toBeDefined();
+
+    const resultA = resultText(await statusToolA!.handler({}, {}));
+    const resultB = resultText(await statusToolB!.handler({}, {}));
+
+    // Both controllers read through the shared RuntimeState — same mcp_ready
+    // flag, same diary persistence verdict, same caches, same probe timestamp.
+    // Before RT-005, apiB's status would have shown pristine defaults while
+    // apiA reflected the live probe outcome.
+    //
+    // last_recall is per-closure (the StatusController that handled the
+    // before_prompt_build hook records the recall on itself), so we compare
+    // the shared sections only.
+    // Both controllers must report the same probe verdict (the regression for
+    // the original bug — apiB used to show "no probe" with pristine defaults).
+    expect(resultA).toMatch(/last_probe: .* — unverified: unavailable/);
+    expect(resultB).toMatch(/last_probe: .* — unverified: unavailable/);
+    expect(resultA).toContain("diary_persistent: no");
+    expect(resultB).toContain("diary_persistent: no");
+    expect(resultA).toContain("mcp_ready: yes");
+    expect(resultB).toContain("mcp_ready: yes");
+    // Diary state propagated through the shared repository.
+    expect(resultA).toContain("persistence: unavailable");
+    expect(resultB).toContain("persistence: unavailable");
+  });
+
+  it("only one mcp.start() call across two register() invocations", async () => {
+    const plugin = await importPlugin();
+    const apiA = makeFakeApi();
+    const apiB = makeFakeApi();
+
+    plugin.register(apiA);
+    plugin.register(apiB);
+
+    // Drive init via apiA only — but the shared RuntimeState means apiB's
+    // initPromise is the same one, so mcp.start runs exactly once.
+    await apiA.emit("before_prompt_build", { prompt: "another test prompt" }, {});
+    await apiB.emit("before_prompt_build", { prompt: "yet another test prompt" }, {});
+
+    expect(mockMcp.start).toHaveBeenCalledTimes(1);
   });
 });

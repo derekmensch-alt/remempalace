@@ -59,8 +59,7 @@ export interface StatusReportInput {
  * Rules (evaluated in order):
  *   offline   — MCP not ready
  *   degraded  — any circuit breaker is open OR
- *               diary persistence is fallback-active/write-ok-unverified OR
- *               any stage has overrun counter > 0
+ *               diary persistence is fallback-active/write-ok-unverified
  *   healthy   — otherwise
  */
 export type HealthLabel = "healthy" | "degraded" | "offline";
@@ -87,14 +86,6 @@ export function deriveHealthLabel(input: StatusReportInput): HealthLabel {
     diaryState === "write-ok-unverified"
   ) {
     return "degraded";
-  }
-
-  // Stage overruns in metrics counters
-  if (input.metrics) {
-    const overrunKeys = Object.keys(input.metrics).filter((k) => k.endsWith(".overrun"));
-    for (const k of overrunKeys) {
-      if ((input.metrics[k] ?? 0) > 0) return "degraded";
-    }
   }
 
   return "healthy";

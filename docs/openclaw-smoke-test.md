@@ -128,8 +128,11 @@ last_recall:
 
 Health label rules:
 - `offline` — MCP not ready
-- `degraded` — any circuit breaker open, diary persistence unverified, or any latency stage overrun
+- `degraded` — any circuit breaker open or diary persistence unverified/fallback-active
 - `healthy` — otherwise
+
+Latency overruns remain visible in the `latency:` section and gateway logs, but they are advisory
+budget telemetry rather than backend health failures.
 
 ## 5. Check process count
 
@@ -155,6 +158,16 @@ remempalace ships_with tiered KG-first recall
 ```
 
 Expected: the agent can answer with the stored object when asked what remempalace ships with. If not, see `TROUBLESHOOTING.md#recall-returns-nothing`.
+
+For status smoke evidence, use a question or explicit prior-context prompt such as:
+
+```text
+what do you remember about remempalace?
+```
+
+That prompt forces full recall and should make `/remempalace status` show non-zero search/KG cache
+entries after the prompt completes. A minimal command prompt such as "reply with ok" is intentionally
+cheap and may leave caches empty.
 
 ## 7. Recall mode classification (optional)
 
