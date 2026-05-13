@@ -1,6 +1,6 @@
 {
   "name": "remempalace",
-  "version": "0.1.0-rc",
+  "version": "0.1.0-rc.2",
   "description": "Full-lifecycle memory plugin for OpenClaw, powered by MemPalace.",
   "type": "module",
   "main": "dist/index.js",
