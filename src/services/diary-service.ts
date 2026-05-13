@@ -23,6 +23,7 @@ export interface DiaryServiceOptions {
   metrics?: Metrics;
   localDir?: string;
   now?: () => Date;
+  persistenceProbeTimeoutMs?: number;
 }
 
 export interface DiaryStartupOptions {
@@ -50,7 +51,9 @@ export class DiaryService {
 
     let probe: DiaryPersistenceProbeResult;
     try {
-      probe = await this.opts.repository.verifyDiaryPersistence({ timeoutMs: DIARY_IO_TIMEOUT_MS });
+      probe = await this.opts.repository.verifyDiaryPersistence({
+        timeoutMs: this.opts.persistenceProbeTimeoutMs ?? DIARY_IO_TIMEOUT_MS,
+      });
     } catch (err) {
       options.onProbeError?.(err instanceof Error ? err : new Error(String(err)));
       return null;

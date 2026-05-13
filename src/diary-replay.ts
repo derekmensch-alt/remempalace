@@ -35,6 +35,12 @@ export interface DiaryReconcilerOptions {
   metrics?: Metrics;
   /** Minimum ms between replay attempts. Defaults to 0 (no throttle). */
   minIntervalMs?: number;
+  /**
+   * Timeout for the per-cycle persistence probe inside `replay()`. Defaults
+   * to the legacy `DIARY_IO_TIMEOUT_MS` (500ms) but should be configured to
+   * a larger value when the probe is allowed to perform a cold-start write.
+   */
+  persistenceProbeTimeoutMs?: number;
 }
 
 const DAILY_FILE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -126,7 +132,9 @@ export class DiaryReconciler {
     // marked replayed (they will be retried next cycle).
     let probePassed = false;
     if (repository.verifyDiaryPersistence) {
-      const probe = await repository.verifyDiaryPersistence({ timeoutMs: DIARY_IO_TIMEOUT_MS });
+      const probe = await repository.verifyDiaryPersistence({
+        timeoutMs: this.opts.persistenceProbeTimeoutMs ?? DIARY_IO_TIMEOUT_MS,
+      });
       if (!probe.verified || !repository.canPersistDiary) {
         this.lastReplayError = probe.error ?? `diary persistence probe did not verify (${probe.state})`;
         const result: ReplayResult = { attempted: 0, succeeded: 0, failed: 0, skipped: true, at };

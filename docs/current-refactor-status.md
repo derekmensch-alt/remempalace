@@ -1,6 +1,15 @@
 # Current Refactor Status
 
-Updated: 2026-05-13T01:12:00-04:00
+Updated: 2026-05-13T15:30:00-04:00
+
+## Top Priority
+
+**RT-005 — Multi-register state sharing.** P0, blocking accurate `/remempalace status` and durable-replay observability. Plan: `docs/superpowers/plans/2026-05-13-multi-register-state-sharing.md`. Task: `tasks/agentic-workflow.json` RT-005. This is the next task to pick up.
+
+## Recently Landed (2026-05-13)
+
+- **RT-006 — Configurable persistence probe timeout** (`diary.persistenceProbeTimeoutMs`, default 3000ms). Fixes the cold-start failure mode where the 500ms probe budget always timed out before MemPalace finished loading its embedding model, leaving `persistenceState` at `tool-present` and gating replay. Replay now drains pending JSONL entries on the first prompt after a gateway restart. Symptom signature documented in `TROUBLESHOOTING.md`.
+- **MemPalace ChromaDB palace recovery (one-off, install-specific).** Diagnosed silent ChromaDB write loss caused by a corrupt HNSW segment on this install (writes accepted but rows never queryable, `col.count()` flat). Resolved via `mempalace repair --mode from-sqlite --archive-existing`; archive at `~/.mempalace/palace.pre-rebuild-20260513-142746` is reversible. Symptom + recovery captured in `docs/upstream-issue-diary.md`.
 
 ## Summary
 

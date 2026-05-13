@@ -79,6 +79,7 @@ export interface RemempalaceConfig {
     maxEntryTokens: number;
     localDir: string;
     replayOnStart: boolean;
+    persistenceProbeTimeoutMs: number;
   };
   kg: {
     autoLearn: boolean;

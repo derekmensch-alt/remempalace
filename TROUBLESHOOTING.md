@@ -233,6 +233,81 @@ Look for the first `error` or `failed` line after `[remempalace] register() comp
 
 ---
 
+## Agent tools (`remempalace_search`, `remempalace_remember`, …) don't appear in the model's tool list
+
+**Symptom:** The memory slot is active, recall injection works, and `openclaw plugins inspect remempalace --json` looks healthy — but the agent says it cannot see the namespaced agent tools (`remempalace_search`, `remempalace_remember`, `remempalace_status`, `remempalace_recent`) and a gateway restart does not help.
+
+**Cause:** Two independent filters can each hide the tools after registration. Check in this order.
+
+### 1. Stale `installs.json` (missing `contracts.tools`)
+
+The host caches plugin metadata at `~/.openclaw/plugins/installs.json`. Tool contracts (`contracts.tools` in `openclaw.plugin.json`) are surfaced to the chat runtime via this snapshot. If the snapshot was generated before remempalace declared its tool contracts, the agent tools are filtered out before they reach the model — even though the plugin registers them correctly at runtime.
+
+Refresh the snapshot, then restart:
+
+```bash
+openclaw plugins registry --refresh
+# or:
+openclaw plugins disable remempalace && openclaw plugins enable remempalace
+openclaw stop && openclaw start
+```
+
+Confirm the cache is current:
+
+```bash
+python3 -c "
+import json
+p = json.load(open('$HOME/.openclaw/plugins/installs.json'))
+r = [x for x in p['plugins'] if x['pluginId'] == 'remempalace'][0]
+print('cached size:', r['manifestFile']['size'])
+print('cached hash:', r['manifestHash'])
+"
+stat -c '%s' ~/.openclaw/plugins/remempalace/openclaw.plugin.json
+sha256sum ~/.openclaw/plugins/remempalace/openclaw.plugin.json
+```
+
+The cached size/hash should match the live manifest.
+
+### 2. Restrictive `tools.profile` (the usual culprit)
+
+OpenClaw's core tool profiles (`minimal`, `coding`, `messaging`) ship with an explicit allowlist of core tool ids. They do **not** include plugin tools by default. Under any of these profiles, `remempalace_*` is filtered out of the model's tool list even though it registered correctly.
+
+Check your active profile:
+
+```bash
+openclaw config get tools.profile
+```
+
+If it returns `coding`, `messaging`, or `minimal`, add an `alsoAllow` entry that names this plugin:
+
+```json5
+"tools": {
+  "profile": "coding",
+  "alsoAllow": ["remempalace"]
+}
+```
+
+Allowlist scopes, narrowest → broadest:
+
+- `["remempalace_search", "remempalace_remember", "remempalace_status", "remempalace_recent"]` — exact tools only.
+- `["remempalace"]` — all current and future remempalace tools (recommended).
+- `["group:plugins"]` — all plugin tools system-wide.
+- Switch `profile` to `"full"` — everything.
+
+Restart the gateway after editing. The bot should then see the four tools.
+
+### 3. (Rare) Plugin not actually registering the tools
+
+If both checks above pass and the tools still aren't visible, confirm registration is happening. With `REMEMPALACE_DEBUG=1`, the gateway log will record the registration. You can also grep the gateway diagnostics for the plugin id:
+
+```bash
+openclaw logs --level debug | grep -i "remempalace.*tool\|registerTool"
+```
+
+A `plugin must declare contracts.tools for: …` diagnostic means the registered tool name isn't in the manifest's `contracts.tools` array — file an issue with the diagnostic text.
+
+---
+
 ## Identity block isn't appearing
 
 **Symptom:** `prefetch.identityEntities` is `true` and `~/SOUL.md` / `~/IDENTITY.md` exist, but the agent has no awareness of them.
@@ -434,6 +509,95 @@ If neither condition is met, the entry stays in the JSONL fallback file (`~/.mem
    ```
 
    and file an issue with the error message.
+
+---
+
+## Diary persistence stuck at `tool-present` / `fallback-active` after a fresh start
+
+**Symptom:** `/remempalace status` reports `diary_persistent: no` and `state: fallback-active` even though `mempalace_diary_write` and `mempalace_diary_read` are both available, MCP is ready, and a direct probe of MemPalace from the command line succeeds. Pending JSONL entries do not drain.
+
+**Gateway log signature:** very close to MCP startup time, before the first diary entry of the session lands:
+
+```
+[remempalace] MCP client started
+[remempalace:mcp-stderr] Embedding function initialized (device=cpu providers=['CPUExecutionProvider'])
+[remempalace] diary persistence unverified: state=tool-present error=MemPalace backend unavailable
+[remempalace:mcp-stderr] Diary entry: diary_wing_remempalace-health_…   ← appears 1–2 seconds AFTER the probe gave up
+```
+
+The probe write actually succeeds on the MemPalace side, but the JSON-RPC response arrives after `diary.persistenceProbeTimeoutMs` has already fired, so remempalace classifies the probe as `BackendUnavailable` and leaves the state at `tool-present`. The replay path is gated on `canPersistDiary === "persistent"`, so the JSONL backlog never drains.
+
+**Cause:** Cold-start MemPalace needs ~1.5–2s to load its embedding model and execute the first ChromaDB write against the persistent index. The default probe budget (3000ms) covers this; if the host is slow (low memory, cold disk cache, container start, antivirus scan), a tighter budget will time out.
+
+**Fix:** Raise `diary.persistenceProbeTimeoutMs` in `~/.openclaw/openclaw.json`:
+
+```json5
+"plugins": {
+  "entries": {
+    "remempalace": {
+      "config": {
+        "diary": { "persistenceProbeTimeoutMs": 5000 }
+      }
+    }
+  }
+}
+```
+
+Restart the gateway. The probe should fit in the new budget, `canPersistDiary` should flip to `persistent`, and the replay path should drain pending JSONL entries on the next session start. This setting only affects the startup probe and per-cycle replay probe — the 500ms prompt-path diary read budget is intentionally separate so that recall never blocks on a slow backend.
+
+If raising the probe timeout still doesn't help, the underlying MemPalace install is genuinely failing — see the next section on persistence-verification failures.
+
+---
+
+## `/remempalace status` shows fresh state but the gateway log says replay succeeded
+
+**Symptom:** Gateway log clearly shows a successful run (single `MCP client started`, exactly one MCP child, an explicit `[remempalace] diary replay: N/M succeeded, K failed` line), yet `/remempalace status` reports:
+
+```
+diary_persistent: no
+diary.state: unavailable
+diary.persistence: unavailable
+last_replay: none
+caches: 0 hits, 0 misses, 0 entries
+```
+
+with `mcp_ready: yes` and capability flags (`diary_write`, `diary_read`, `kg_writable`) all `yes`.
+
+**Cause:** OpenClaw calls `plugin.register()` multiple times in the same gateway process — once per registration mode (`setup-only`, `setup-runtime`, `tool-discovery`, `discovery`, `full`, `cli-metadata`). Each call constructs a fresh closure with its own `McpMemPalaceRepository`, `DiaryReconciler`, caches, init promise, and health-probe state. `McpClient` is the only object that is shared across register calls today (via `McpClient.shared(pythonBin)`), which is why MCP readiness and capability flags stay consistent across closures. Everything else is per-closure: only the closure whose `before_prompt_build` fired first runs `ensureInit`, so the probe and replay land in *that* closure’s repository. The closure whose `registerTool` call is resolved when the agent invokes `remempalace_status` may be a different one, so it reads pristine state.
+
+Recall, KG writes, and new diary writes still work — they all ride the shared `McpClient`. The mismatch is cosmetic from the user’s perspective, but it makes operational status untrustworthy and obscures real replay errors.
+
+**Status:** tracked as **RT-005** in `tasks/agentic-workflow.json` (P0). Design and acceptance criteria live in `docs/superpowers/plans/2026-05-13-multi-register-state-sharing.md`. The fix extends the `McpClient.shared` singleton pattern to the other stateful objects.
+
+**Until the fix lands, how to verify the real state:**
+
+1. Check the gateway log directly — it’s authoritative:
+
+   ```bash
+   journalctl --user -u openclaw-gateway --since "10 minutes ago" \
+     | grep -E "diary replay|persistence unverified|MCP client started"
+   ```
+
+   A `diary replay: N/M succeeded, K failed` line means the probe verified and replay ran.
+
+2. Check the JSONL fallback dir — if entries are draining (`.replayed` sidecars present), persistence is working:
+
+   ```bash
+   ls -lt ~/.mempalace/palace/diary/ | head
+   ```
+
+3. Probe MemPalace directly:
+
+   ```bash
+   ~/.venvs/mempalace/bin/python -c "
+   from mempalace import mcp_server as M
+   import time; s=f'probe {time.time()}'
+   print('write:', M.tool_diary_write(agent_name='probe', entry=s, topic='probe').get('success'))
+   r = M.tool_diary_read(agent_name='probe', last_n=3)
+   print('read match:', any(e.get('content')==s for e in r.get('entries', [])))"
+   ```
+
+   `True` / `True` means persistence is healthy regardless of what `remempalace_status` reports.
 
 ---
 

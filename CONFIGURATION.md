@@ -144,11 +144,15 @@ Controls the end-of-session diary write.
 |-------|------|---------|------------------|
 | `enabled` | `boolean` | `true` | Master switch for diary writes. If `false`, remempalace won't write a session summary at all. |
 | `maxEntryTokens` | `number` | `500` | Hard cap on the diary entry size, in tokens. Larger sessions get summarized more aggressively. |
+| `localDir` | `string` | `~/.mempalace/palace/diary` | Directory for the local JSONL fallback used while persistence is unverified. Supports `~` expansion. |
+| `replayOnStart` | `boolean` | `true` | Replay pending local JSONL entries to MemPalace once persistence is verified. |
+| `persistenceProbeTimeoutMs` | `number` | `3000` | Timeout for the startup persistence probe and per-cycle replay probe. Distinct from the 500ms prompt-path read budget. |
 
 When to tune:
 
 - Set `enabled: false` if you don't want any persistent record of sessions. (You can still use KG writes for facts.)
 - Raise `maxEntryTokens` for long working sessions where the default summary feels too lossy.
+- Raise `persistenceProbeTimeoutMs` if `/remempalace status` reports `diary_persistent: no` on a known-good MemPalace install — that's the classic cold-start symptom where the embedding model load plus first ChromaDB write outruns the probe budget.
 
 ---
 

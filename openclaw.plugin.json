@@ -68,7 +68,8 @@
           "enabled": { "type": "boolean", "default": true },
           "maxEntryTokens": { "type": "number", "default": 500 },
           "localDir": { "type": "string", "description": "Directory for local JSONL diary fallback. Supports ~ expansion. Default: ~/.mempalace/palace/diary" },
-          "replayOnStart": { "type": "boolean", "default": true, "description": "Replay pending local diary entries to MemPalace when MCP becomes available." }
+          "replayOnStart": { "type": "boolean", "default": true, "description": "Replay pending local diary entries to MemPalace when MCP becomes available." },
+          "persistenceProbeTimeoutMs": { "type": "number", "default": 3000, "description": "Timeout (ms) for the startup diary persistence probe and per-cycle replay probe. Must be large enough to cover mempalace cold-start (embedding model load + first chromadb write, typically 1.5–2s). Distinct from the 500ms prompt-path diary read budget." }
         }
       },
       "kg": {

@@ -41,6 +41,11 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
     maxEntryTokens: 500,
     localDir: `${homedir()}/.mempalace/palace/diary`,
     replayOnStart: true,
+    // Cold-start mempalace needs ~1.5–2s to load the embedding model and
+    // complete the first chromadb write. The legacy 500ms hot-path budget
+    // would always fail on the very first probe after a restart, leaving
+    // diary persistence stuck in `tool-present` and gating replay.
+    persistenceProbeTimeoutMs: 3000,
   },
   kg: {
     autoLearn: true,

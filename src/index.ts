@@ -302,6 +302,7 @@ const plugin = {
       repository: mempalaceRepository,
       metrics,
       localDir: cfg.diary.localDir,
+      persistenceProbeTimeoutMs: cfg.diary.persistenceProbeTimeoutMs,
     });
     const promptInjectionService = new PromptInjectionService();
     const recallService = new RecallService(router);
@@ -311,6 +312,7 @@ const plugin = {
       repository: mempalaceRepository,
       metrics,
       minIntervalMs: 5 * 60 * 1000,
+      persistenceProbeTimeoutMs: cfg.diary.persistenceProbeTimeoutMs,
     });
 
     // Health cache: path derived from hotCache path directory.
