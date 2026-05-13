@@ -1,14 +1,6 @@
 import { promises as fs } from "node:fs";
-import { dirname, join } from "node:path";
 import { mergeConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { loadHotCache, saveHotCache } from "./recall-cache-store.js";
-import {
-  loadHealthCache,
-  saveHealthCache,
-  buildHealthSnapshot,
-  type LoadedHealthCache,
-} from "./services/health-cache-store.js";
 
 const DEBUG_PATH = "/tmp/remempalace-last-inject.log";
 async function debugLog(label: string, data: unknown): Promise<void> {
@@ -21,37 +13,31 @@ async function debugLog(label: string, data: unknown): Promise<void> {
     // swallow
   }
 }
-import { MemoryCache } from "./cache.js";
 import { McpClient } from "./mcp-client.js";
-import { MemoryRouter, normalizeIntent, type ReadBundle } from "./router.js";
-import type { SearchResult, RemempalaceConfig } from "./types.js";
+import { normalizeIntent, type ReadBundle } from "./router.js";
+import type { RemempalaceConfig } from "./types.js";
 import { BudgetManager, DEFAULT_CONTEXT_WINDOW } from "./budget.js";
 import { buildTieredInjection } from "./tiers.js";
 import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
 import { summarizeSession } from "./diary.js";
-import { KgBatcher } from "./kg.js";
-import { prefetchWakeUp } from "./prefetch.js";
-import { HeartbeatWarmer } from "./heartbeat.js";
 import { loadIdentityContext } from "./identity.js";
+import { prefetchWakeUp } from "./prefetch.js";
 import { compactIdentity } from "./identity-compact.js";
 import { isTimelineQuery, queryTimeline } from "./timeline.js";
-import { MempalaceMemoryRuntime } from "./memory-runtime.js";
 import { registerRemempalaceAgentTools } from "./agent-tools.js";
 import { StatusController } from "./controllers/status-controller.js";
-import { Metrics } from "./metrics.js";
-import { DiaryReconciler, type ReplayResult } from "./diary-replay.js";
-import { McpMemPalaceRepository } from "./adapters/mcp-mempalace-repository.js";
-import { DiaryService } from "./services/diary-service.js";
 import {
   buildDefaultRuntimeDisclosure,
   PromptInjectionService,
 } from "./services/prompt-injection-service.js";
-import { RecallService } from "./services/recall-service.js";
-import { LearningService } from "./services/learning-service.js";
 import { kgSourceClosetForRole } from "./services/learning-service.js";
-import { LatencyMetricsService } from "./services/metrics-service.js";
-import { BackendCircuitBreakers } from "./services/circuit-breaker.js";
+import {
+  buildHealthSnapshot,
+  saveHealthCache,
+} from "./services/health-cache-store.js";
+import { saveHotCache } from "./recall-cache-store.js";
+import { getRuntimeState } from "./runtime-state.js";
 
 interface SessionMessage {
   role?: string;
@@ -263,78 +249,44 @@ const plugin = {
     const logger = createLogger("remempalace");
     logger.info(`config resolved: pythonBin=${cfg.mcpPythonBin}`);
 
-    const metrics = new Metrics();
-    const latencyMetrics = new LatencyMetricsService();
-    const breakers = new BackendCircuitBreakers({
-      search: cfg.breaker.search,
-      kg: cfg.breaker.kg,
-      diary: cfg.breaker.diary,
-    });
+    const mcp = McpClient.shared({ pythonBin: cfg.mcpPythonBin });
+    // Shared runtime state — survives across multiple register() invocations.
+    // OpenClaw calls register() once per registration mode (setup-only,
+    // setup-runtime, tool-discovery, discovery, full, cli-metadata) and only
+    // one closure's before_prompt_build hook will fire; we route every closure
+    // through this shared container so all of them observe the same live state.
+    const runtime = getRuntimeState(mcp, cfg, { logger });
+    const {
+      metrics,
+      latencyMetrics,
+      breakers,
+      searchCache,
+      kgCache,
+      mempalaceRepository,
+      router,
+      diaryService,
+      recallService,
+      diaryReconciler,
+      kgBatcher,
+      learningService,
+      heartbeat,
+      memoryRuntime,
+      health,
+      healthCachePath,
+      hookFiredSessions,
+      sessionMessages,
+      lastIngestedIndexBySession,
+      precomputedRecallBySession,
+      sessionStartCache,
+      cachedBySession,
+      initPromise,
+    } = runtime;
     const stageBudgets = {
       init: cfg.injection.budgets.initMs,
       fetch: cfg.injection.budgets.fetchMs,
       format: cfg.injection.budgets.formatMs,
     };
-    const mcp = McpClient.shared({ pythonBin: cfg.mcpPythonBin });
-    const searchCache = new MemoryCache<SearchResult[]>({
-      capacity: cfg.cache.capacity,
-      ttlMs: cfg.cache.ttlMs,
-    });
-    const kgCache = new MemoryCache<unknown>({
-      capacity: cfg.cache.capacity,
-      ttlMs: cfg.cache.kgTtlMs,
-    });
-    const mempalaceRepository = new McpMemPalaceRepository(mcp, {
-      latency: latencyMetrics,
-      breakers,
-    });
-    const router = new MemoryRouter({
-      repository: mempalaceRepository,
-      searchCache,
-      kgCache,
-      similarityThreshold: cfg.injection.similarityThreshold,
-      knownEntities: cfg.injection.knownEntities,
-      metrics,
-      bundleCacheTtlMs: cfg.cache.bundleTtlMs,
-      bundleCacheCapacity: cfg.cache.capacity,
-    });
-    const diaryService = new DiaryService({
-      repository: mempalaceRepository,
-      metrics,
-      localDir: cfg.diary.localDir,
-      persistenceProbeTimeoutMs: cfg.diary.persistenceProbeTimeoutMs,
-    });
     const promptInjectionService = new PromptInjectionService();
-    const recallService = new RecallService(router);
-
-    const diaryReconciler = new DiaryReconciler({
-      diaryDir: cfg.diary.localDir,
-      repository: mempalaceRepository,
-      metrics,
-      minIntervalMs: 5 * 60 * 1000,
-      persistenceProbeTimeoutMs: cfg.diary.persistenceProbeTimeoutMs,
-    });
-
-    // Health cache: path derived from hotCache path directory.
-    const healthCachePath = join(dirname(cfg.hotCache.path), "health-cache.json");
-    // Mutable probe/replay state — updated by the init path, consumed by gateway_stop flush.
-    let lastHealthProbeAt: number | null = null;
-    let lastHealthProbeReason: string | null = null;
-    let lastHealthReplay: ReplayResult | null = null;
-    // Cold-start hint loaded on register — available immediately for /remempalace status.
-    let coldStartHealth: LoadedHealthCache | null = null;
-
-    if (cfg.hotCache.enabled) {
-      // Fire-and-forget health cache warm load.
-      loadHealthCache(healthCachePath)
-        .then((loaded) => {
-          if (loaded) {
-            coldStartHealth = loaded;
-            metrics.inc("health_cache.loaded");
-          }
-        })
-        .catch(() => metrics.inc("health_cache.load_failed"));
-    }
 
     const flushHealthCache = async (): Promise<void> => {
       try {
@@ -347,9 +299,9 @@ const plugin = {
             canPersistDiary: mempalaceRepository.canPersistDiary,
           },
           diaryPersistenceState: mempalaceRepository.diaryPersistenceState,
-          lastProbeAt: lastHealthProbeAt,
-          lastProbeReason: lastHealthProbeReason,
-          lastReplay: lastHealthReplay,
+          lastProbeAt: health.lastProbeAt,
+          lastProbeReason: health.lastProbeReason,
+          lastReplay: health.lastReplay,
         });
         await saveHealthCache(healthCachePath, snapshot);
         metrics.inc("health_cache.flushed");
@@ -357,9 +309,6 @@ const plugin = {
         metrics.inc("health_cache.flush_failed");
       }
     };
-
-    // Hot cache: warm-load on register, periodic flush, final flush on stop.
-    let hotCacheInterval: ReturnType<typeof setInterval> | null = null;
 
     const flushHotCache = async (): Promise<void> => {
       try {
@@ -375,129 +324,11 @@ const plugin = {
       }
     };
 
-    if (cfg.hotCache.enabled) {
-      // Fire-and-forget warm load; do not block registration.
-      loadHotCache(cfg.hotCache.path)
-        .then((snapshot) => {
-          if (snapshot) {
-            const loaded = router.importHotEntries(snapshot.entries, Date.now());
-            metrics.inc("recall.hot_cache.loaded_entries", loaded);
-          }
-        })
-        .catch(() => metrics.inc("recall.hot_cache.load_failed"));
-
-      hotCacheInterval = setInterval(() => {
-        void flushHotCache();
-      }, cfg.hotCache.flushIntervalMs);
-    }
-
-    // Declared before ensureInit so the closure can call heartbeat.start().
-    const heartbeat = new HeartbeatWarmer({
-      intervalMs: 30 * 60 * 1000,
-      warm: async () => {
-        await prefetchWakeUp(mempalaceRepository, { diaryCount: cfg.prefetch.diaryCount });
-      },
+    // Idempotent: only the first register call wires up the periodic flush.
+    runtime.startHotCacheTimerOnce(() => {
+      void flushHotCache();
     });
 
-    // Lazy-start: MCP, heartbeat, and diary replay are deferred until the first
-    // event that needs them.  This avoids spawning a python child process during
-    // plugin registration (e.g. in environments that import the plugin but never
-    // trigger a session).
-    let _initPromise: Promise<void> | null = null;
-
-    function ensureInit(): Promise<void> {
-      if (_initPromise) return _initPromise;
-      _initPromise = mcp
-        .start()
-        .then(async () => {
-          logger.info("MCP client started");
-          await mcp.probeCapabilities().catch(() => {});
-          await diaryService.verifyPersistenceAndReplay({
-            replayOnStart: cfg.diary.replayOnStart,
-            reconciler: diaryReconciler,
-            onProbeError: (err) => {
-              lastHealthProbeAt = Date.now();
-              lastHealthProbeReason = `probe-error: ${err.message}`;
-              logger.warn(`diary persistence probe failed: ${err.message}`);
-            },
-            onProbeResult: (result) => {
-              lastHealthProbeAt = Date.now();
-              lastHealthProbeReason = result.verified
-                ? `verified: ${result.state}`
-                : `unverified: ${result.state}${result.error ? ` (${result.error})` : ""}`;
-              if (!result.verified) {
-                logger.warn(
-                  `diary persistence unverified: state=${result.state}${result.error ? ` error=${result.error}` : ""}`,
-                );
-              }
-            },
-            onReplayResult: (r) => {
-              lastHealthReplay = r;
-              if (r.attempted > 0) {
-                logger.info(
-                  `diary replay: ${r.succeeded}/${r.attempted} succeeded, ${r.failed} failed`,
-                );
-              }
-            },
-            onReplayError: (err) => {
-              logger.warn(`diary replay failed: ${err.message}`);
-            },
-          });
-          // Heartbeat starts only once MCP is confirmed alive.
-          heartbeat.start();
-        })
-        .catch((err: Error) => {
-          // Allow retry on next trigger by clearing the cached promise.
-          _initPromise = null;
-          logger.error(`MCP start failed: ${err.message}`);
-        });
-      return _initPromise;
-    }
-
-    // initPromise getter — allows existing `await initPromise` call-sites to keep
-    // working while the actual start is lazy.
-    const initPromise: Promise<void> = {
-      then: (...args: Parameters<Promise<void>["then"]>) => ensureInit().then(...args),
-      catch: (...args: Parameters<Promise<void>["catch"]>) => ensureInit().catch(...args),
-      finally: (...args: Parameters<Promise<void>["finally"]>) => ensureInit().finally(...args),
-      [Symbol.toStringTag]: "Promise",
-    } as Promise<void>;
-
-    const memoryRuntime = new MempalaceMemoryRuntime({
-      mcp,
-      repository: mempalaceRepository,
-      similarityThreshold: cfg.injection.similarityThreshold,
-      allowedReadRoots: cfg.memoryRuntime.allowedReadRoots,
-      allowedWriteRoots: cfg.memoryRuntime.allowedWriteRoots,
-      waitUntilReady: () => initPromise,
-    });
-
-    const cachedBySession = new Map<string, string[] | null>();
-    // Tracks sessions for which before_prompt_build has already fired and
-    // returned { prependSystemContext }.  The builder checks this set and
-    // returns [] when the hook already handled injection — preventing the same
-    // block from appearing twice when OpenClaw calls both the hook return AND
-    // the registered builder.
-    //
-    // Two injection paths exist to support both old and new OpenClaw hosts:
-    //   1. before_prompt_build return value (modern path, prependSystemContext)
-    //   2. registerMemoryCapability / registerMemoryPromptSection (legacy path)
-    //
-    // Exactly-once guarantee:
-    //   • Modern host (exposes api.on + honours hook return values):
-    //     before_prompt_build fires -> flag set -> hook return used by OpenClaw
-    //     -> builder returns [] -> single injection via hook return.
-    //   • Legacy host (does not expose api.on at all):
-    //     flag is never set -> builder fires normally -> single injection via
-    //     builder.
-    //
-    // A host that exposes api.on but ignores hook returns is treated as modern
-    // (flag is set, builder is a no-op).  In practice any host that exposes
-    // api.on honours before_prompt_build return values.
-    const hookFiredSessions = new Set<string>();
-    const sessionMessages = new Map<string, SessionMessage[]>();
-    const lastIngestedIndexBySession = new Map<string, number>();
-    const precomputedRecallBySession = new Map<string, PrecomputedRecall>();
     const statusController = new StatusController({
       isMcpReady: () => mcp.isReady(),
       canWriteDiary: () => mempalaceRepository.canWriteDiary,
@@ -510,47 +341,16 @@ const plugin = {
       latencySnapshot: () => latencyMetrics.snapshot(),
       breakersSnapshot: () => breakers.snapshot(),
       diaryStatus: () => diaryService.getStatus({ reconciler: diaryReconciler }),
-      lastProbeAt: () => lastHealthProbeAt,
-      lastProbeReason: () => lastHealthProbeReason,
-      coldStartHealth: () => coldStartHealth,
+      lastProbeAt: () => health.lastProbeAt,
+      lastProbeReason: () => health.lastProbeReason,
+      coldStartHealth: () => health.coldStart,
     });
-    const sessionStartCache = new Map<
-      string,
-      { status: unknown; diaryEntries: unknown[]; identity: { soul: string; identity: string } }
-    >();
 
     const budgetManager = new BudgetManager({
       maxMemoryTokens: cfg.injection.maxTokens,
       budgetPercent: cfg.injection.budgetPercent,
       l2BudgetFloor: cfg.tiers.l2BudgetFloor,
     });
-
-    const kgBatcher = cfg.kg.autoLearn
-      ? new KgBatcher(mempalaceRepository, {
-          batchSize: cfg.kg.batchSize,
-          flushIntervalMs: cfg.kg.flushIntervalMs,
-          invalidateOnConflict: cfg.kg.invalidateOnConflict,
-          metrics,
-          onFactsWritten: (facts) => {
-            for (const f of facts) {
-              router.deleteKgEntity(f.subject);
-              router.deleteKgEntity(f.object);
-              router.deleteBundleCacheEntriesForEntity(f.subject);
-              router.deleteBundleCacheEntriesForEntity(f.object);
-            }
-          },
-        })
-      : null;
-
-    const learningService = kgBatcher
-      ? new LearningService({
-          batcher: kgBatcher,
-          minConfidence: cfg.kg.minConfidence,
-          config: cfg.learning,
-          metrics,
-          logger,
-        })
-      : null;
 
     if (typeof api.on === "function") {
       api.on("session_start", async (_event: unknown, ctx: unknown) => {
@@ -1024,10 +824,7 @@ const plugin = {
       api.on("gateway_stop", async () => {
         heartbeat.stop();
         if (kgBatcher) await kgBatcher.stop();
-        if (hotCacheInterval !== null) {
-          clearInterval(hotCacheInterval);
-          hotCacheInterval = null;
-        }
+        runtime.stopHotCacheTimer();
         if (cfg.hotCache.enabled) await flushHotCache();
         if (cfg.hotCache.enabled) await flushHealthCache();
         await mcp.stop();
