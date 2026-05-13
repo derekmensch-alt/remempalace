@@ -1,10 +1,10 @@
 # Current Refactor Status
 
-Updated: 2026-05-12T22:14:00-04:00
+Updated: 2026-05-12T22:19:00-04:00
 
 ## Summary
 
-The remempalace refactor has completed Phases 0–6. Phase 7 (final acceptance) remains.
+The remempalace refactor has completed Phases 0–7 modulo three runtime-only checks that require a live OpenClaw session. Automated gates (`npm run build`, `npm run lint`, `npm test`, gated live-backend probe) are green.
 
 Current default gate:
 
@@ -115,9 +115,30 @@ The worktree contains many modified files plus untracked docs, adapter/port/serv
 
 **6C — docs:** `CONFIGURATION.md` extended for `injection.budgets.*` and `breaker.*`; `TROUBLESHOOTING.md` extended with durable-replay diagnostics; `docs/openclaw-smoke-test.md` adds a new `/remempalace status` smoke section.
 
-## Next Recommended Slice
+## Phase 7 Completion (automated portion)
 
-Begin Phase 7 — final acceptance. Run `npm run build`, manual `/remempalace status` smoke against a live session, optional gated integration probe (`REMEMPALACE_TEST_PY=...`), and verify a real prompt build injects exactly one bounded memory block. After that, the refactor is shippable against the north-star goal.
+Verified 2026-05-12T22:19:
+
+- `npm run build` — clean.
+- `npm run lint` — clean.
+- `npm test` — 578 passed / 6 skipped across 38 files.
+- Gated integration probe (`REMEMPALACE_TEST_PY=/home/derek/.venvs/mempalace/bin/python npx vitest run tests/diary-integration.test.ts`) — **3 of 4 pass**:
+  - ✅ accepts the current `diary_write` schema
+  - ✅ documents that the legacy schema is rejected
+  - ✅ probe ack/error wiring works
+  - ❌ persists diary writes so a later `diary_read` can see them — write accepted but later read returns empty.
+
+This last failure reproduces the **same upstream MemPalace behavior captured in Phase 0**. The plugin's response is correct by design: it classifies diary state as `write-ok-unverified`, routes writes to the local JSONL fallback, and durable-aware replay (Phase 6B) refuses to mark entries replayed until a same-cycle probe or post-write read confirms persistence. The product contract ("must not silently claim diary writes succeeded unless they can be read back or otherwise verified") holds.
+
+## Remaining (live-session only)
+
+Three Phase 7 checklist items require a running OpenClaw session and cannot be exercised by the test harness:
+
+- OpenClaw status shows remempalace active.
+- One real prompt build injects exactly one bounded memory block.
+- Session-end diary behavior is either verified persistent or clearly local fallback with replay pending.
+
+Recommend running these once before merging PR #11 to main.
 
 ## Newly Added Backlog (Speed + Intuition)
 

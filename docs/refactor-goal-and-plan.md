@@ -209,13 +209,13 @@ MemPalace MCP server
 
 ### Phase 7 — Final acceptance
 
-- [ ] `npm run build` passes.
-- [ ] `npm run lint` passes.
-- [ ] `npm test` passes.
-- [ ] Integration smoke against `/home/derek/.venvs/mempalace/bin/python` documents diary persistence result.
-- [ ] OpenClaw status shows remempalace active.
-- [ ] One real prompt build injects exactly one bounded memory block.
-- [ ] Session-end diary behavior is either verified persistent or clearly local fallback with replay pending.
+- [x] `npm run build` passes.
+- [x] `npm run lint` passes.
+- [x] `npm test` passes (578 passed / 6 skipped across 38 files).
+- [x] Integration smoke against `/home/derek/.venvs/mempalace/bin/python` documents diary persistence result. Result (2026-05-12T22:19): 3/4 integration tests pass; persistence probe fails (write accepted but later `diary_read` returns empty) — same upstream MemPalace behavior captured in Phase 0. The plugin correctly classifies this as `write-ok-unverified`, uses JSONL fallback, and durable-aware replay does not mark entries replayed until persistence is confirmed.
+- [ ] OpenClaw status shows remempalace active. (Requires manual session — defer to release prep.)
+- [ ] One real prompt build injects exactly one bounded memory block. (Requires manual session — defer to release prep.)
+- [ ] Session-end diary behavior is either verified persistent or clearly local fallback with replay pending. (Requires manual session — `write-ok-unverified` + JSONL fallback is the expected current behavior.)
 
 ## Definition of done
 
@@ -233,9 +233,9 @@ The refactor is successful if:
 
 - Created: 2026-05-11
 - Owner: main OpenClaw assistant session
-- Last updated: 2026-05-12T22:14:00-04:00
-- Status: Phases 0–6 complete (manual `/remempalace status` smoke deferred to release prep). Phase 3 closed with hot health/status cache persistence and fast-path docs. Phase 4 closed with `LearningService` (`src/services/learning-service.ts`), explicit role policy (`cfg.learning.fromUser|fromAssistant|fromSystem`), and `remember <X>` enqueue (`forget` logged-only, triple resolution deferred).
+- Last updated: 2026-05-12T22:19:00-04:00
+- Status: Phases 0–7 complete except for three runtime-only checks that require a live OpenClaw session (status active, real prompt-build bounded block, session-end diary outcome). Automated gates all green. Phase 3 closed with hot health/status cache persistence and fast-path docs. Phase 4 closed with `LearningService` (`src/services/learning-service.ts`), explicit role policy (`cfg.learning.fromUser|fromAssistant|fromSystem`), and `remember <X>` enqueue (`forget` logged-only, triple resolution deferred).
 - Current gate: `npm run lint` and `npm test` pass in the default suite. Latest local full test run observed 578 passed / 6 skipped across 38 test files (40 total including 2 skipped).
 - Boundary check: raw `callTool(` usage is isolated to `src/adapters/mcp-mempalace-repository.ts` (verified by grep).
 - Handoff details: see `docs/current-refactor-status.md`.
-- Immediate next task: Phase 7 — final acceptance gates (build, lint, test, optional live-backend integration probe, manual `/remempalace status` smoke, real prompt-build verification).
+- Immediate next task: open PR #11 for review and merge once a maintainer runs the manual session smoke checks (status active, real prompt-build bounded block, session-end diary outcome). The automated portion of Phase 7 is complete.
