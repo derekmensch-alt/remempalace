@@ -85,7 +85,7 @@ The worktree contains many modified files plus untracked docs, adapter/port/serv
 ## Phase 4 Completion
 
 - Added `src/services/learning-service.ts`. Public surface: `ingestTurn(text, role)` — applies role gate, runs structured fact extraction, dedups, enqueues via the existing batcher.
-- Explicit role policy via `cfg.learning.fromUser` (default `true`), `cfg.learning.fromAssistant` (`false`), `cfg.learning.fromSystem` (`false`). The `llm_output` hook in `src/index.ts` reads `cfg.learning.fromAssistant` as the single source of truth; legacy `cfg.kg.learnFromAssistant` is retained in types/defaults for backward compat.
+- Explicit role policy via `cfg.learning.fromUser` (default `true`), `cfg.learning.fromAssistant` (`false`), `cfg.learning.fromSystem` (`false`). The `llm_output` hook in `src/index.ts` reads `cfg.learning.fromAssistant` as the single source of truth; the legacy `cfg.kg.learnFromAssistant` field has been removed from the internal config surface.
 - `remember <X>` enqueued as a high-confidence user-note fact with its own dedup key. `forget <X>` is logged-only this slice — triple resolution against existing KG entries needs a recall-path search and is deferred (documented inline).
 - `src/index.ts` shrank by ~41 lines (removed inline `learnedKgKeys` set, `rememberLearnedKgKey`, `learnKgFactsFromText`, and inline memory-command logging).
 - New tests in `tests/learning-service.test.ts` cover extraction thresholds, dedup, role gating, and remember/forget behavior.

@@ -82,7 +82,6 @@ export interface RemempalaceConfig {
   };
   kg: {
     autoLearn: boolean;
-    learnFromAssistant: boolean;
     batchSize: number;
     flushIntervalMs: number;
     invalidateOnConflict: boolean;

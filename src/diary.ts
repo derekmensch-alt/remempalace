@@ -123,6 +123,6 @@ export function writeDiaryAsync(
   summary: string,
   metrics?: Metrics,
   options?: WriteDiaryOptions,
-): void {
-  new DiaryService({ repository, metrics, localDir: options?.localDir }).writeSessionSummaryAsync(summary);
+): Promise<void> {
+  return new DiaryService({ repository, metrics, localDir: options?.localDir }).writeSessionSummaryAsync(summary);
 }

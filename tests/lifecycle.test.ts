@@ -13,17 +13,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { McpClient } from "../src/mcp-client.js";
 import { HeartbeatWarmer } from "../src/heartbeat.js";
+import { LearningService } from "../src/services/learning-service.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 type EventHandler = (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
+type ToolHandler = (args?: Record<string, unknown>, ctx?: unknown) => Promise<unknown> | unknown;
+
+interface FakeToolDefinition {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+  handler: ToolHandler;
+}
 
 interface FakeApi {
   on: ReturnType<typeof vi.fn>;
   registerMemoryCapability: ReturnType<typeof vi.fn>;
   registerCommand: ReturnType<typeof vi.fn>;
+  registerTool: ReturnType<typeof vi.fn>;
   /** Trigger a registered event by name. */
   emit: (name: string, event?: unknown, ctx?: unknown) => Promise<unknown>;
 }
@@ -37,6 +47,7 @@ function makeFakeApi(): FakeApi {
     }),
     registerMemoryCapability: vi.fn(),
     registerCommand: vi.fn(),
+    registerTool: vi.fn(),
     async emit(name, event = {}, ctx = {}) {
       const h = handlers.get(name);
       if (h) return await h(event, ctx);
@@ -113,6 +124,25 @@ async function importPlugin() {
   return mod.default;
 }
 
+function registeredTools(api: FakeApi): FakeToolDefinition[] {
+  return api.registerTool.mock.calls.map(([tool]) => tool as FakeToolDefinition);
+}
+
+function expectRegisteredTool(api: FakeApi, name: string): FakeToolDefinition {
+  const tool = registeredTools(api).find((entry) => entry.name === name);
+  expect(tool, `expected ${name} to be registered`).toBeDefined();
+  expect(tool?.handler).toBeTypeOf("function");
+  return tool!;
+}
+
+function resultText(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (result && typeof result === "object" && "text" in result) {
+    return String((result as { text?: unknown }).text ?? "");
+  }
+  return JSON.stringify(result);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -133,6 +163,132 @@ describe("lazy-start: register() does not start MCP eagerly", () => {
     plugin.register(api);
     await new Promise((r) => setImmediate(r));
     expect(heartbeatStartSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("agent-facing remempalace tools", () => {
+  const EXPECTED_TOOL_NAMES = [
+    "remempalace_search",
+    "remempalace_remember",
+    "remempalace_status",
+    "remempalace_recent",
+  ];
+
+  it("registers the agent-facing tools with callable handlers", async () => {
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+
+    plugin.register(api);
+
+    const names = registeredTools(api).map((tool) => tool.name);
+    expect(names).toEqual(expect.arrayContaining(EXPECTED_TOOL_NAMES));
+    for (const name of EXPECTED_TOOL_NAMES) {
+      const tool = expectRegisteredTool(api, name);
+      expect(tool.description).toEqual(expect.any(String));
+      expect(tool.inputSchema).toBeDefined();
+    }
+    for (const [tool, opts] of api.registerTool.mock.calls) {
+      expect(opts).toMatchObject({ name: tool.name });
+    }
+  });
+
+  it("remempalace_search forces full MemPalace search for agent queries", async () => {
+    mockMcp.callTool.mockImplementation(async (name: string) => {
+      if (name === "mempalace_search") {
+        return {
+          results: [
+            {
+              text: "Project Atlas uses OpenClaw memory.",
+              wing: "projects",
+              room: "atlas",
+              similarity: 0.91,
+            },
+          ],
+        };
+      }
+      return {};
+    });
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    const tool = expectRegisteredTool(api, "remempalace_search");
+    const result = await tool.handler({ query: "deployment", limit: 2 }, { sessionKey: "tools" });
+
+    expect(mockMcp.start).toHaveBeenCalledTimes(1);
+    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_search", {
+      query: "deployment",
+      limit: 2,
+    }, 8000);
+    expect(resultText(result)).toContain("Project Atlas uses OpenClaw memory.");
+  });
+
+  it("remember writes an explicit high-confidence user note without needing real OpenClaw", async () => {
+    mockMcp.callTool.mockResolvedValue({ success: true });
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    const tool = expectRegisteredTool(api, "remempalace_remember");
+    const result = await tool.handler({ memory: "The user prefers compact status summaries." }, { sessionKey: "tools" });
+
+    expect(mockMcp.start).toHaveBeenCalledTimes(1);
+    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_kg_add", {
+      subject: "I",
+      predicate: "user_note",
+      object: "The user prefers compact status summaries.",
+      source_closet: "openclaw:user",
+    });
+    expect(resultText(result)).toMatch(/remembered|stored|ok/i);
+  });
+
+  it("does not register a forget tool until deletion semantics are implemented", async () => {
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    const names = registeredTools(api).map((tool) => tool.name);
+    expect(names).not.toContain("forget");
+    expect(names).not.toContain("remempalace_forget");
+  });
+
+  it("status returns the same health surface as the slash command", async () => {
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    const tool = expectRegisteredTool(api, "remempalace_status");
+    const result = await tool.handler({}, { sessionKey: "tools" });
+
+    expect(resultText(result)).toMatch(/remempalace/i);
+    expect(resultText(result)).toMatch(/mcp|diary|cache|breaker/i);
+  });
+
+  it("recent reads recent diary entries through the local fake MCP client", async () => {
+    mockMcp.hasDiaryRead = true;
+    mockMcp.callTool.mockImplementation(async (name: string) => {
+      if (name === "mempalace_diary_read") {
+        return {
+          entries: [
+            { date: "2026-05-13", content: "Discussed agent-facing memory tools." },
+          ],
+        };
+      }
+      return {};
+    });
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    const tool = expectRegisteredTool(api, "remempalace_recent");
+    const result = await tool.handler({ limit: 3 }, { sessionKey: "tools" });
+
+    expect(mockMcp.start).toHaveBeenCalledTimes(1);
+    expect(mockMcp.callTool).toHaveBeenCalledWith("mempalace_diary_read", {
+      agent_name: "remempalace",
+      last_n: 3,
+    }, 500);
+    expect(resultText(result)).toContain("Discussed agent-facing memory tools.");
   });
 });
 
@@ -584,6 +740,49 @@ describe("recall gating: low-semantic prompts", () => {
       },
       8000,
     );
+  });
+
+  it("ingests only newly appended llm_input history messages per session", async () => {
+    const ingestSpy = vi.spyOn(LearningService.prototype, "ingestTurn");
+    const plugin = await importPlugin();
+    const api = makeFakeApi();
+    plugin.register(api);
+
+    await api.emit(
+      "llm_input",
+      {
+        historyMessages: [
+          { role: "user", content: "I prefer TypeScript." },
+          { role: "assistant", content: "Noted." },
+        ],
+      },
+      { sessionKey: "incremental-learning" },
+    );
+    await api.emit(
+      "llm_input",
+      {
+        historyMessages: [
+          { role: "user", content: "I prefer TypeScript." },
+          { role: "assistant", content: "Noted." },
+          { role: "user", content: "My project is remempalace." },
+        ],
+      },
+      { sessionKey: "incremental-learning" },
+    );
+    await api.emit(
+      "llm_input",
+      {
+        historyMessages: [
+          { role: "user", content: "I prefer TypeScript." },
+        ],
+      },
+      { sessionKey: "other-learning-session" },
+    );
+
+    expect(ingestSpy).toHaveBeenCalledTimes(3);
+    expect(ingestSpy).toHaveBeenNthCalledWith(1, "I prefer TypeScript.", "user");
+    expect(ingestSpy).toHaveBeenNthCalledWith(2, "My project is remempalace.", "user");
+    expect(ingestSpy).toHaveBeenNthCalledWith(3, "I prefer TypeScript.", "user");
   });
 
   it("falls back to an empty full-recall bundle when prompt-path recall times out", async () => {

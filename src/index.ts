@@ -25,7 +25,7 @@ import { MemoryCache } from "./cache.js";
 import { McpClient } from "./mcp-client.js";
 import { MemoryRouter, normalizeIntent, type ReadBundle } from "./router.js";
 import type { SearchResult, RemempalaceConfig } from "./types.js";
-import { BudgetManager } from "./budget.js";
+import { BudgetManager, DEFAULT_CONTEXT_WINDOW } from "./budget.js";
 import { buildTieredInjection } from "./tiers.js";
 import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
@@ -37,7 +37,8 @@ import { loadIdentityContext } from "./identity.js";
 import { compactIdentity } from "./identity-compact.js";
 import { isTimelineQuery, queryTimeline } from "./timeline.js";
 import { MempalaceMemoryRuntime } from "./memory-runtime.js";
-import { buildStatusReport, type LastRecallStatus } from "./status-command.js";
+import { registerRemempalaceAgentTools } from "./agent-tools.js";
+import { StatusController } from "./controllers/status-controller.js";
 import { Metrics } from "./metrics.js";
 import { DiaryReconciler, type ReplayResult } from "./diary-replay.js";
 import { McpMemPalaceRepository } from "./adapters/mcp-mempalace-repository.js";
@@ -48,6 +49,7 @@ import {
 } from "./services/prompt-injection-service.js";
 import { RecallService } from "./services/recall-service.js";
 import { LearningService } from "./services/learning-service.js";
+import { kgSourceClosetForRole } from "./services/learning-service.js";
 import { LatencyMetricsService } from "./services/metrics-service.js";
 import { BackendCircuitBreakers } from "./services/circuit-breaker.js";
 
@@ -83,6 +85,10 @@ interface PluginApi {
   registerMemoryCapability?: (capability: MemoryCapability) => void;
   registerMemoryPromptSection?: (fn: (params: unknown) => string[]) => void;
   registerCommand?: (command: PluginCommandDefinition) => void;
+  registerTool?: (
+    tool: unknown,
+    opts?: { name?: string; names?: string[]; optional?: boolean },
+  ) => void;
   on?: (
     event: string,
     handler: (event: unknown, ctx: unknown) => Promise<unknown> | unknown,
@@ -488,8 +494,24 @@ const plugin = {
     // api.on honours before_prompt_build return values.
     const hookFiredSessions = new Set<string>();
     const sessionMessages = new Map<string, SessionMessage[]>();
+    const lastIngestedIndexBySession = new Map<string, number>();
     const precomputedRecallBySession = new Map<string, PrecomputedRecall>();
-    let lastRecall: LastRecallStatus | null = null;
+    const statusController = new StatusController({
+      isMcpReady: () => mcp.isReady(),
+      canWriteDiary: () => mempalaceRepository.canWriteDiary,
+      canReadDiary: () => mempalaceRepository.canReadDiary,
+      canInvalidateKg: () => mempalaceRepository.canInvalidateKg,
+      canPersistDiary: () => mempalaceRepository.canPersistDiary,
+      searchCacheStats: () => searchCache.stats(),
+      kgCacheStats: () => kgCache.stats(),
+      metricsSnapshot: () => metrics.snapshot(),
+      latencySnapshot: () => latencyMetrics.snapshot(),
+      breakersSnapshot: () => breakers.snapshot(),
+      diaryStatus: () => diaryService.getStatus({ reconciler: diaryReconciler }),
+      lastProbeAt: () => lastHealthProbeAt,
+      lastProbeReason: () => lastHealthProbeReason,
+      coldStartHealth: () => coldStartHealth,
+    });
     const sessionStartCache = new Map<
       string,
       { status: unknown; diaryEntries: unknown[]; identity: { soul: string; identity: string } }
@@ -558,11 +580,14 @@ const plugin = {
           const messages = ev.historyMessages as SessionMessage[];
           sessionMessages.set(key, messages);
           if (learningService) {
-            for (const message of messages) {
+            const previousIndex = lastIngestedIndexBySession.get(key) ?? 0;
+            const startIndex = previousIndex <= messages.length ? previousIndex : 0;
+            for (const message of messages.slice(startIndex)) {
               if (message.role !== "user") continue;
               const clean = stripRuntimeInjectionBlocks(extractText(message));
               learningService.ingestTurn(clean, "user");
             }
+            lastIngestedIndexBySession.set(key, messages.length);
           }
           const prompt = latestUserPrompt(messages);
           if (!prompt || prompt.length < 10 || isTimelineQuery(prompt) || recallService.shouldSkipRecall(prompt)) {
@@ -607,14 +632,15 @@ const plugin = {
       });
 
       if (cfg.diary.enabled) {
-        api.on("session_end", (event: unknown, ctx: unknown) => {
+        api.on("session_end", async (event: unknown, ctx: unknown) => {
           const hctx = ctx as HookContext;
           const key = hctx?.sessionKey ?? "default";
           const messages = sessionMessages.get(key) ?? [];
           sessionMessages.delete(key);
+          lastIngestedIndexBySession.delete(key);
           const summary = summarizeSession(messages, { maxTokens: cfg.diary.maxEntryTokens });
           if (!summary) return;
-          diaryService.writeSessionSummaryAsync(summary);
+          await diaryService.writeSessionSummaryAsync(summary);
         });
       }
 
@@ -728,7 +754,7 @@ const plugin = {
           return;
         }
 
-        const contextWindow = hctx.contextWindow ?? 200000;
+        const contextWindow = hctx.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
         const conversationTokens = ev.messages
           ? ev.messages.reduce((sum, m) => sum + countTokens(extractText(m)), 0)
           : 0;
@@ -949,7 +975,7 @@ const plugin = {
             finalLineCount: lines.length,
             finalBlock: lines.join("\n"),
           });
-          lastRecall = {
+          statusController.recordRecall({
             sessionKey,
             promptPreview: prompt.slice(0, 160),
             candidates,
@@ -958,7 +984,7 @@ const plugin = {
             injectedLineCount: injected.length,
             identityIncluded: identityCompacted.length > 0,
             at: Date.now(),
-          };
+          });
           cachedBySession.set(sessionKey, lines);
 
           // Return the block as prependSystemContext — openclaw's
@@ -979,7 +1005,7 @@ const plugin = {
           await debugLog("before_prompt_build:error", { sessionKey, error: (err as Error).message });
           logger.warn(`recall failed: ${(err as Error).message}`);
           cachedBySession.set(sessionKey, lines);
-          lastRecall = {
+          statusController.recordRecall({
             sessionKey,
             promptPreview: prompt.slice(0, 160),
             candidates: [],
@@ -988,7 +1014,7 @@ const plugin = {
             injectedLineCount: 0,
             identityIncluded: false,
             at: Date.now(),
-          };
+          });
           return { prependSystemContext: lines.join("\n") };
         }
       });
@@ -1042,56 +1068,42 @@ const plugin = {
       api.registerMemoryPromptSection(builder);
     }
 
-    if (typeof api.registerCommand === "function") {
-      api.registerCommand({
-        name: "remempalace",
-        description: "Show remempalace memory plugin status (health, latency, breakers, diary)",
-        acceptsArgs: false,
-        handler: async () => {
-          const diaryStatus = await diaryService.getStatus({ reconciler: diaryReconciler });
-          const liveReport = buildStatusReport({
-            mcpReady: mcp.isReady(),
-            canWriteDiary: mempalaceRepository.canWriteDiary,
-            canReadDiary: mempalaceRepository.canReadDiary,
-            canInvalidateKg: mempalaceRepository.canInvalidateKg,
-            canPersistDiary: mempalaceRepository.canPersistDiary,
-            searchCache: searchCache.stats(),
-            kgCache: kgCache.stats(),
-            metrics: metrics.snapshot(),
-            latency: latencyMetrics.snapshot(),
-            breakers: breakers.snapshot(),
-            diary: diaryStatus,
-            lastProbeAt: lastHealthProbeAt,
-            lastProbeReason: lastHealthProbeReason,
-            lastRecall,
-          });
-          // Append cold-start health hint when MCP hasn't init'd yet and a snapshot exists.
-          if (!mcp.isReady() && coldStartHealth) {
-            const h = coldStartHealth.snapshot;
-            const age = Math.round((Date.now() - h.savedAt) / 1000);
-            const staleMark = coldStartHealth.stale ? " [stale]" : "";
-            const hintLines = [
-              "",
-              `cold_start_hint (${age}s ago${staleMark}):`,
-              `  mcp_ready: ${h.mcpReady}`,
-              `  diary_persistence: ${h.diaryPersistenceState}`,
-              `  capabilities: write=${h.capabilities.canWriteDiary} read=${h.capabilities.canReadDiary} kg_invalidate=${h.capabilities.canInvalidateKg} persist=${h.capabilities.canPersistDiary}`,
-            ];
-            if (h.lastProbeAt !== null) {
-              const probeAge = Math.round((Date.now() - h.lastProbeAt) / 1000);
-              hintLines.push(`  last_probe: ${probeAge}s ago — ${h.lastProbeReason ?? "unknown"}`);
-            }
-            if (h.lastReplay) {
-              hintLines.push(
-                `  last_replay: ${h.lastReplay.succeeded}/${h.lastReplay.attempted} succeeded`,
-              );
-            }
-            return { text: liveReport + "\n" + hintLines.join("\n") };
-          }
-          return { text: liveReport };
-        },
-      });
-    }
+    const buildLiveStatusText = (): Promise<string> => statusController.buildText();
+
+    registerRemempalaceAgentTools(api, {
+      ensureReady: () => initPromise,
+      recallService,
+      rememberFact: async (memory: string) => {
+        const fact = {
+          subject: "I",
+          predicate: "user_note",
+          object: memory,
+          source_closet: kgSourceClosetForRole("user"),
+        };
+        if (kgBatcher) {
+          kgBatcher.add(fact);
+          await kgBatcher.flush();
+        } else {
+          await mempalaceRepository.addKgFact(fact);
+          router.deleteKgEntity(fact.subject);
+          router.deleteKgEntity(fact.object);
+          router.deleteBundleCacheEntriesForEntity(fact.subject);
+          router.deleteBundleCacheEntriesForEntity(fact.object);
+        }
+        return fact;
+      },
+      statusText: buildLiveStatusText,
+      readRecentDiary: async (limit: number) => {
+        if (!mempalaceRepository.canReadDiary) return { entries: [] };
+        return await mempalaceRepository.readDiary({
+          agentName: "remempalace",
+          lastN: limit,
+          timeoutMs: 500,
+        });
+      },
+    });
+
+    statusController.registerCommand(api);
   },
 };
 

@@ -23,9 +23,7 @@ describe("writeDiaryAsync fallback routing", () => {
       writeDiary: vi.fn(),
     };
 
-    writeDiaryAsync(repository, "local fallback summary");
-    // Allow the microtask queue to drain
-    await new Promise((r) => setTimeout(r, 20));
+    await writeDiaryAsync(repository, "local fallback summary");
 
     expect(appendLocalDiary).toHaveBeenCalledOnce();
     const call = (appendLocalDiary as ReturnType<typeof vi.fn>).mock.calls[0][0];
@@ -42,8 +40,7 @@ describe("writeDiaryAsync fallback routing", () => {
       writeDiary: vi.fn().mockResolvedValue(undefined),
     };
 
-    writeDiaryAsync(repository, "remote summary");
-    await new Promise((r) => setTimeout(r, 20));
+    await writeDiaryAsync(repository, "remote summary");
 
     expect(repository.writeDiary).toHaveBeenCalledOnce();
     expect(repository.writeDiary).toHaveBeenCalledWith({
@@ -61,8 +58,7 @@ describe("writeDiaryAsync fallback routing", () => {
       writeDiary: vi.fn(),
     };
 
-    writeDiaryAsync(repository, "summary", undefined, { localDir: "/custom/diary/path" });
-    await new Promise((r) => setTimeout(r, 20));
+    await writeDiaryAsync(repository, "summary", undefined, { localDir: "/custom/diary/path" });
 
     expect(appendLocalDiary).toHaveBeenCalledOnce();
     const call = (appendLocalDiary as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -86,8 +82,7 @@ describe("DiaryService", () => {
       now: () => new Date("2026-05-11T00:00:00.000Z"),
     });
 
-    service.writeSessionSummaryAsync("summary");
-    await new Promise((r) => setTimeout(r, 20));
+    await service.writeSessionSummaryAsync("summary");
 
     expect(repository.writeDiary).not.toHaveBeenCalled();
     expect(appendLocalDiary).toHaveBeenCalledWith(
@@ -109,8 +104,7 @@ describe("DiaryService", () => {
     };
     const service = new DiaryService({ repository });
 
-    service.writeSessionSummaryAsync("summary");
-    await new Promise((r) => setTimeout(r, 20));
+    await service.writeSessionSummaryAsync("summary");
 
     expect(repository.writeDiary).toHaveBeenCalledWith({
       agentName: "remempalace",

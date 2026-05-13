@@ -83,27 +83,27 @@ export class DiaryService {
     };
   }
 
-  writeSessionSummaryAsync(summary: string): void {
+  async writeSessionSummaryAsync(summary: string): Promise<void> {
     this.opts.metrics?.inc("diary.write.attempted");
 
     if (this.opts.repository.canPersistDiary) {
-      void this.opts.repository
-        .writeDiary({
+      try {
+        await this.opts.repository.writeDiary({
           agentName: "remempalace",
           entry: summary,
           topic: "session",
           timeoutMs: DIARY_IO_TIMEOUT_MS,
-        })
-        .then(() => this.opts.metrics?.inc("diary.write.mcp_succeeded"))
-        .catch(() => {
-          this.opts.metrics?.inc("diary.write.mcp_failed");
-          return this.writeLocal(summary);
         });
+        this.opts.metrics?.inc("diary.write.mcp_succeeded");
+      } catch {
+        this.opts.metrics?.inc("diary.write.mcp_failed");
+        await this.writeLocal(summary);
+      }
       return;
     }
 
     this.opts.metrics?.inc("diary.write.persistence_unverified");
-    void this.writeLocal(summary);
+    await this.writeLocal(summary);
   }
 
   private writeLocal(summary: string): Promise<void> {

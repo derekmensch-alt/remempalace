@@ -23,13 +23,13 @@ An alternative to memory-core.
 - A **persistent connection** to MemPalace (no per-turn process spawning)
 - An **in-memory LRU cache** so repeat queries are instant (<5ms)
 - **Tiered injection** that only loads what's actually relevant
-- **Two-way memory** — reads *and* writes, so the agent actually learns over time
+- **Two-way memory** — reads *and* writes conservative learned facts over time
 - **Identity injection** — loads SOUL.md + IDENTITY.md once per session at zero latency
 - **Timeline queries** — detects "what happened yesterday?" and injects a chronological diary/KG summary
 
 ## Architecture
 
-A Node.js/TypeScript plugin that keeps one MemPalace process warm and talks to it over MCP / JSON-RPC. Recent results are LRU-cached. Before each turn the plugin injects a small, ranked, deduplicated summary of relevant memories — sized to fit the remaining context window. Between turns it batches up new facts and writes them to the knowledge graph. At session end it writes a diary entry.
+A Node.js/TypeScript plugin that keeps one MemPalace process warm and talks to it over MCP / JSON-RPC. Recent results are LRU-cached. Before each turn the plugin injects a small, ranked summary of relevant memories — sized to fit the remaining context window. Between turns it batches up new facts and writes them to the knowledge graph. At session end it writes a diary entry.
 
 For the deep version, read the [architecture doc](docs/architecture.md) or the [design spec](docs/superpowers/specs/2026-04-16-remempalace-design.md).
 
@@ -103,11 +103,22 @@ A minimal override (the 90% case):
 }
 ```
 
-For every option in detail — `cache`, `tiers`, `diary`, `kg`, `prefetch`, `identity`, `memoryRuntime` — see **[CONFIGURATION.md](CONFIGURATION.md)**.
+For every option in detail — `cache`, `tiers`, `diary`, `kg`, `learning`, `prefetch`, `identity`, `memoryRuntime`, `hotCache`, and `breaker` — see **[CONFIGURATION.md](CONFIGURATION.md)**.
 
 ## Debug mode
 
 Set `REMEMPALACE_DEBUG=1` in the OpenClaw gateway environment to dump per-prompt decisions (candidates, per-entity KG counts, injected block) to `/tmp/remempalace-last-inject.log`. Useful when diagnosing why a particular fact did or didn't surface. Leave unset in normal operation — the debug path adds sequential KG lookups.
+
+## Agent tools
+
+When the host supports plugin tools, remempalace registers:
+
+- `remempalace_search` — search KG facts and semantic memory.
+- `remempalace_remember` — store an explicit user note as a KG `user_note`.
+- `remempalace_status` — expose the same health surface as `/remempalace status`.
+- `remempalace_recent` — read recent diary entries.
+
+No agent-facing forget tool is registered until KG deletion/invalidation semantics are implemented.
 
 ## Project layout
 
