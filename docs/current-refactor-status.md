@@ -122,7 +122,7 @@ Verified 2026-05-12T22:19:
 - `npm run build` — clean.
 - `npm run lint` — clean.
 - `npm test` — 578 passed / 6 skipped across 38 files.
-- Gated integration probe (`REMEMPALACE_TEST_PY=/home/derek/.venvs/mempalace/bin/python npx vitest run tests/diary-integration.test.ts`) — **3 of 4 pass**:
+- Gated integration probe (`REMEMPALACE_TEST_PY=$HOME/.venvs/mempalace/bin/python npx vitest run tests/diary-integration.test.ts`) — **3 of 4 pass**:
   - ✅ accepts the current `diary_write` schema
   - ✅ documents that the legacy schema is rejected
   - ✅ probe ack/error wiring works

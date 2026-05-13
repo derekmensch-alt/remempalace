@@ -212,7 +212,7 @@ MemPalace MCP server
 - [x] `npm run build` passes.
 - [x] `npm run lint` passes.
 - [x] `npm test` passes (578 passed / 6 skipped across 38 files).
-- [x] Integration smoke against `/home/derek/.venvs/mempalace/bin/python` documents diary persistence result. Result (2026-05-12T22:19): 3/4 integration tests pass; persistence probe fails (write accepted but later `diary_read` returns empty) — same upstream MemPalace behavior captured in Phase 0. The plugin correctly classifies this as `write-ok-unverified`, uses JSONL fallback, and durable-aware replay does not mark entries replayed until persistence is confirmed.
+- [x] Integration smoke against `$HOME/.venvs/mempalace/bin/python` documents diary persistence result. Result (2026-05-12T22:19): 3/4 integration tests pass; persistence probe fails (write accepted but later `diary_read` returns empty) — same upstream MemPalace behavior captured in Phase 0. The plugin correctly classifies this as `write-ok-unverified`, uses JSONL fallback, and durable-aware replay does not mark entries replayed until persistence is confirmed.
 - [ ] OpenClaw status shows remempalace active. (Requires manual session — defer to release prep.)
 - [ ] One real prompt build injects exactly one bounded memory block. (Requires manual session — defer to release prep.)
 - [ ] Session-end diary behavior is either verified persistent or clearly local fallback with replay pending. (Requires manual session — `write-ok-unverified` + JSONL fallback is the expected current behavior.)
