@@ -3,6 +3,14 @@
   "kind": "memory",
   "name": "remempalace",
   "description": "Full-lifecycle memory plugin for OpenClaw, powered by MemPalace. Fast (persistent MCP), token-aware (tiered injection), complete (diary + KG lifecycle).",
+  "contracts": {
+    "tools": [
+      "remempalace_search",
+      "remempalace_remember",
+      "remempalace_status",
+      "remempalace_recent"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
