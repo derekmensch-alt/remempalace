@@ -577,10 +577,10 @@
       "id": "RT-005",
       "title": "Share plugin state across repeated register() calls",
       "priority": "P0",
-      "status": "ready",
+      "status": "review",
       "area": "runtime",
       "depends_on": [],
-      "problem": "OpenClaw invokes plugin.register() multiple times per gateway process — once per registration mode (setup-only, setup-runtime, tool-discovery, discovery, full, cli-metadata; see loader-B-GXgDrk.js:3654-3692). McpClient.shared() already returns a singleton across register calls, but McpMemPalaceRepository, DiaryReconciler, search/KG caches, the init promise, and the health-probe state are constructed fresh per closure. Only one closure ever runs ensureInit; the others keep their persistenceState at the constructor default \"unavailable\" and serve agent-tool calls (notably remempalace_status) with stale state. Observed symptom: gateway log shows successful probe + replay (\"diary replay: 199/201 succeeded\") while /remempalace status simultaneously reports diary_persistent: no, last_replay: none, and caches: 0 entries. Recall, recent diary writes, and KG writes still work — they ride the shared McpClient — but the durable-replay/status surface is incoherent.",
+      "problem": "OpenClaw invokes plugin.register() multiple times per gateway process \u2014 once per registration mode (setup-only, setup-runtime, tool-discovery, discovery, full, cli-metadata; see loader-B-GXgDrk.js:3654-3692). McpClient.shared() already returns a singleton across register calls, but McpMemPalaceRepository, DiaryReconciler, search/KG caches, the init promise, and the health-probe state are constructed fresh per closure. Only one closure ever runs ensureInit; the others keep their persistenceState at the constructor default \"unavailable\" and serve agent-tool calls (notably remempalace_status) with stale state. Observed symptom: gateway log shows successful probe + replay (\"diary replay: 199/201 succeeded\") while /remempalace status simultaneously reports diary_persistent: no, last_replay: none, and caches: 0 entries. Recall, recent diary writes, and KG writes still work \u2014 they ride the shared McpClient \u2014 but the durable-replay/status surface is incoherent.",
       "plan": [
         "Add a module-level RuntimeState container keyed by the shared McpClient (or pythonBin fingerprint). Construct McpMemPalaceRepository, DiaryReconciler, searchCache, kgCache, the init promise, and the lastHealthProbe* fields inside it.",
         "Refactor register() to call getRuntimeState(mcp, cfg) instead of constructing inline, and rebind the per-closure services (RecallService, PromptInjectionService, StatusController, agent-tool factories) to that shared state.",
@@ -592,7 +592,7 @@
         "Two register() calls produce one McpMemPalaceRepository instance, one DiaryReconciler instance, and a shared init promise.",
         "After one gateway restart + one agent prompt, /remempalace status shows diary_persistent: yes, diary.state: persistent (or fallback-active if pending > 0), last_replay populated.",
         "Test suite remains green; new identity test passes.",
-        "RT-001 invariant holds — exactly one mempalace.mcp_server child per gateway run.",
+        "RT-001 invariant holds \u2014 exactly one mempalace.mcp_server child per gateway run.",
         "TROUBLESHOOTING.md gains a 'multi-register state mismatch' section that documents the contract."
       ],
       "verification": {
@@ -606,9 +606,24 @@
         ]
       },
       "agent_prompt": "Implement the shared-state fix described in docs/superpowers/plans/2026-05-13-multi-register-state-sharing.md. Extend the McpClient.shared singleton pattern to McpMemPalaceRepository, DiaryReconciler, the caches, the init promise, and lastHealthProbe* state. Verify with the listed commands and confirm /remempalace status flips to diary_persistent: yes after one gateway restart + one prompt.",
-      "evidence": [],
-      "changed_files": [],
-      "followups": [],
+      "evidence": [
+        "Started RT-005 (2026-05-13): shared-state refactor on branch feat/RT-005-shared-runtime-state.",
+        "Implementation commit e154b3a: src/runtime-state.ts (new) holds metrics/breakers/caches/repository/router/diary services/reconciler/kgBatcher/learningService/heartbeat/memoryRuntime/health slot/per-session maps + singleton ensureInit. Keyed by McpClient instance. src/index.ts register() now consumes getRuntimeState(); only per-closure objects are StatusController, PromptInjectionService, BudgetManager, and agent-tool wiring.",
+        "Workspace verification: npm run lint clean; npm run build clean; npm test 601 passed / 6 skipped across 41 files (baseline 593+6, +8 from new tests, no regressions).",
+        "Tests: tests/runtime-state.test.ts (new) covers identity-equality on repeated getRuntimeState, first-call cfg wins, distinct McpClient -> distinct state, reset clears cache, mcp.start invoked once, shared health slot observable. tests/lifecycle.test.ts gained RT-005 regression tests (status observability across closures, single mcp.start across two register calls); afterEach now calls resetRuntimeStateForTests.",
+        "Status: review \u2014 not pushed to origin, waiting on maintainer sign-off + live gateway verification."
+      ],
+      "changed_files": [
+        "src/runtime-state.ts",
+        "src/index.ts",
+        "tests/runtime-state.test.ts",
+        "tests/lifecycle.test.ts"
+      ],
+      "followups": [
+        "Live verification: openclaw gateway restart; ask bot /remempalace status and confirm diary_persistent: yes after one before_prompt_build event.",
+        "Confirm exactly one mempalace.mcp_server child via ps -ef.",
+        "If green, mark RT-005 done and merge feat/RT-005-shared-runtime-state to main."
+      ],
       "active_agent": null
     },
     {
@@ -618,7 +633,7 @@
       "status": "done",
       "area": "runtime",
       "depends_on": [],
-      "problem": "The diary persistence probe used a hardcoded 500ms timeout (DIARY_IO_TIMEOUT_MS) borrowed from the prompt-path read budget. Cold-start MemPalace needs ~1.5–2s for embedding-model load plus first ChromaDB write, so the probe always timed out on a fresh gateway restart. The adapter parked persistenceState at tool-present and the replay path — which is gated on canPersistDiary === \"persistent\" — never drained pending JSONL entries.",
+      "problem": "The diary persistence probe used a hardcoded 500ms timeout (DIARY_IO_TIMEOUT_MS) borrowed from the prompt-path read budget. Cold-start MemPalace needs ~1.5\u20132s for embedding-model load plus first ChromaDB write, so the probe always timed out on a fresh gateway restart. The adapter parked persistenceState at tool-present and the replay path \u2014 which is gated on canPersistDiary === \"persistent\" \u2014 never drained pending JSONL entries.",
       "plan": [
         "Add diary.persistenceProbeTimeoutMs to the config schema (RemempalaceConfig, DEFAULT_CONFIG, openclaw.plugin.json) with a 3000ms default.",
         "Thread the option through DiaryServiceOptions and DiaryReconcilerOptions; use it in both verifyDiaryPersistence call sites, keeping DIARY_IO_TIMEOUT_MS (500ms) as the fallback so the prompt-path read budget stays separate.",
@@ -626,7 +641,7 @@
       ],
       "acceptance": [
         "Default 3000ms is large enough to cover cold-start MemPalace on supported platforms.",
-        "Prompt-path diary reads keep the 500ms budget — the new field only governs the startup/replay probe.",
+        "Prompt-path diary reads keep the 500ms budget \u2014 the new field only governs the startup/replay probe.",
         "Type-check, lint, and full test suite green.",
         "Live: after gateway restart, journalctl shows replay drain instead of 'diary persistence unverified: state=tool-present'."
       ],
@@ -639,8 +654,8 @@
       },
       "agent_prompt": "Already implemented on 2026-05-13. See changed files for the diff.",
       "evidence": [
-        "Verified on the maintainer's install: gateway restart → MCP child up → probe completed inside 3000ms → 'diary replay: 199/201 succeeded, 0 failed' in journalctl.",
-        "npm run build: clean. npm run lint: clean. npm test: 593 passed / 6 skipped across 40 test files (was 590/6 — no regressions; new paths exercised by existing diary tests).",
+        "Verified on the maintainer's install: gateway restart \u2192 MCP child up \u2192 probe completed inside 3000ms \u2192 'diary replay: 199/201 succeeded, 0 failed' in journalctl.",
+        "npm run build: clean. npm run lint: clean. npm test: 593 passed / 6 skipped across 40 test files (was 590/6 \u2014 no regressions; new paths exercised by existing diary tests).",
         "Field documented in CONFIGURATION.md `diary` table and TROUBLESHOOTING.md 'Diary persistence stuck at tool-present / fallback-active after a fresh start' section."
       ],
       "changed_files": [
@@ -654,7 +669,7 @@
         "TROUBLESHOOTING.md"
       ],
       "followups": [
-        "RT-005 — even with this fix, multi-register state mismatch leaves the status display showing a stale `unavailable` while the live closure has `persistent`. Tracked separately."
+        "RT-005 \u2014 even with this fix, multi-register state mismatch leaves the status display showing a stale `unavailable` while the live closure has `persistent`. Tracked separately."
       ],
       "active_agent": null
     }

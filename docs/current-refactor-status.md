@@ -4,7 +4,13 @@ Updated: 2026-05-13T15:30:00-04:00
 
 ## Top Priority
 
-**RT-005 — Multi-register state sharing.** P0, blocking accurate `/remempalace status` and durable-replay observability. Plan: `docs/superpowers/plans/2026-05-13-multi-register-state-sharing.md`. Task: `tasks/agentic-workflow.json` RT-005. This is the next task to pick up.
+**RT-005 — Multi-register state sharing.** Status: **review** (implementation complete, awaiting live verification). Branch: `feat/RT-005-shared-runtime-state` (commit `e154b3a`, **not pushed**). New module `src/runtime-state.ts` owns the singleton runtime container keyed by `McpClient`; `register()` consumes it via `getRuntimeState()`. Workspace gates green: lint clean, build clean, `npm test` 601/6 (baseline 593/6, +8 from new tests, no regressions). Plan: `docs/superpowers/plans/2026-05-13-multi-register-state-sharing.md`.
+
+**Next action (resume here):**
+1. `git checkout feat/RT-005-shared-runtime-state` and `npm run build`.
+2. `openclaw gateway restart`, then ask the bot `/remempalace status` after one prompt — expect `diary_persistent: yes`, `diary.state: persistent` (or `fallback-active` if pending > 0), `last_replay` populated.
+3. Confirm exactly one `mempalace.mcp_server` child via `ps -ef`.
+4. If green, mark RT-005 `done` in `tasks/agentic-workflow.json` and merge to `main`.
 
 ## Recently Landed (2026-05-13)
 
