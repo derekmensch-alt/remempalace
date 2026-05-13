@@ -1,5 +1,7 @@
 import type { InjectionBudget, Tier } from "./types.js";
 
+export const DEFAULT_CONTEXT_WINDOW = 32000;
+
 export interface BudgetManagerOptions {
   maxMemoryTokens: number;
   budgetPercent: number;
@@ -11,7 +13,7 @@ export class BudgetManager {
 
   compute(params: { conversationTokens: number; contextWindow?: number }): InjectionBudget {
     const { maxMemoryTokens, budgetPercent, l2BudgetFloor } = this.opts;
-    const contextWindow = params.contextWindow ?? 200000;
+    const contextWindow = params.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
     const safetyMargin = 0.1;
     const available = Math.max(
       0,

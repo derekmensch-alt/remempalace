@@ -35,7 +35,15 @@
           },
           "identityMaxTokens": { "type": "number", "default": 150, "description": "Token budget for the compacted identity block." },
           "rawIdentity": { "type": "boolean", "default": false, "description": "Inject raw SOUL.md/IDENTITY.md text instead of the compacted form." },
-          "fastRaceMs": { "type": "number", "default": 50, "description": "Window (ms) to wait for a precomputed recall bundle before falling back to cheap mode. Long enough to use an already-resolved promise; short enough to never block on a fresh MCP round-trip." }
+          "fastRaceMs": { "type": "number", "default": 50, "description": "Window (ms) to wait for a precomputed recall bundle before falling back to cheap mode. Long enough to use an already-resolved promise; short enough to never block on a fresh MCP round-trip." },
+          "budgets": {
+            "type": "object",
+            "properties": {
+              "initMs": { "type": "number", "default": 200 },
+              "fetchMs": { "type": "number", "default": 1100 },
+              "formatMs": { "type": "number", "default": 200 }
+            }
+          }
         }
       },
       "tiers": {
@@ -59,11 +67,18 @@
         "type": "object",
         "properties": {
           "autoLearn": { "type": "boolean", "default": true },
-          "learnFromAssistant": { "type": "boolean", "default": false, "description": "Extract KG facts from assistant output. Disabled by default to reduce memory poisoning risk." },
           "batchSize": { "type": "number", "default": 5 },
           "flushIntervalMs": { "type": "number", "default": 30000 },
           "invalidateOnConflict": { "type": "boolean", "default": false, "description": "Call mempalace_kg_invalidate on existing facts when a conflicting single-value predicate is learned." },
           "minConfidence": { "type": "number", "default": 0.6, "description": "Minimum confidence score (0–1) for a structured fact to be written to the KG." }
+        }
+      },
+      "learning": {
+        "type": "object",
+        "properties": {
+          "fromUser": { "type": "boolean", "default": true },
+          "fromAssistant": { "type": "boolean", "default": false, "description": "Extract KG facts from assistant output. Disabled by default to reduce memory poisoning risk." },
+          "fromSystem": { "type": "boolean", "default": false }
         }
       },
       "prefetch": {
@@ -88,6 +103,11 @@
             "type": "array",
             "items": { "type": "string" },
             "description": "Filesystem roots the memory runtime is allowed to read. Supports ~ expansion. Default: [~/.mempalace, ~/.openclaw/workspace]"
+          },
+          "allowedWriteRoots": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Filesystem roots the memory runtime is allowed to write. Supports ~ expansion. Default: []"
           }
         }
       },
@@ -98,6 +118,35 @@
           "path": { "type": "string", "description": "Path for the hot cache snapshot file. Supports ~ expansion. Default: ~/.mempalace/remempalace/hot-cache.json" },
           "maxEntries": { "type": "number", "default": 50, "description": "Maximum number of bundle cache entries to persist." },
           "flushIntervalMs": { "type": "number", "default": 60000, "description": "How often (ms) to flush the hot cache to disk during a session." }
+        }
+      },
+      "breaker": {
+        "type": "object",
+        "properties": {
+          "search": {
+            "type": "object",
+            "properties": {
+              "failureThreshold": { "type": "number", "default": 3 },
+              "windowMs": { "type": "number", "default": 10000 },
+              "cooldownMs": { "type": "number", "default": 15000 }
+            }
+          },
+          "kg": {
+            "type": "object",
+            "properties": {
+              "failureThreshold": { "type": "number", "default": 3 },
+              "windowMs": { "type": "number", "default": 10000 },
+              "cooldownMs": { "type": "number", "default": 15000 }
+            }
+          },
+          "diary": {
+            "type": "object",
+            "properties": {
+              "failureThreshold": { "type": "number", "default": 3 },
+              "windowMs": { "type": "number", "default": 10000 },
+              "cooldownMs": { "type": "number", "default": 15000 }
+            }
+          }
         }
       }
     }

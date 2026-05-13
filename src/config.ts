@@ -44,7 +44,6 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
   },
   kg: {
     autoLearn: true,
-    learnFromAssistant: false,
     batchSize: 5,
     flushIntervalMs: 30000,
     invalidateOnConflict: false,

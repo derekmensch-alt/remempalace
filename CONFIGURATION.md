@@ -43,10 +43,11 @@ interface RemempalaceConfig {
   tiers:          { l1Threshold: number; l2Threshold: number; l2BudgetFloor: number };
   diary:          { enabled: boolean; maxEntryTokens: number };
   kg:             { autoLearn: boolean; batchSize: number; flushIntervalMs: number;
-                    invalidateOnConflict: boolean };
+                    invalidateOnConflict: boolean; minConfidence: number };
+  learning:       { fromUser: boolean; fromAssistant: boolean; fromSystem: boolean };
   prefetch:       { diaryCount: number; identityEntities: boolean };
   identity:       { soulPath: string; identityPath: string; maxChars: number };
-  memoryRuntime:  { allowedReadRoots: string[] };
+  memoryRuntime:  { allowedReadRoots: string[]; allowedWriteRoots: string[] };
   hotCache:       { enabled: boolean; path: string; maxEntries: number; flushIntervalMs: number };
 }
 ```
@@ -161,12 +162,30 @@ Controls automatic knowledge-graph writes from conversation.
 | `batchSize` | `number` | `5` | Buffer up to N pending facts before flushing. Reduces MCP roundtrips on chatty turns. |
 | `flushIntervalMs` | `number` | `30000` (30s) | Flush the buffer every N ms even if `batchSize` hasn't been reached. Backstop for slow sessions. |
 | `invalidateOnConflict` | `boolean` | `false` | When a new fact contradicts an existing one (same subject+predicate, different object), mark the old fact `current: false` instead of dropping the write. Off by default while the upstream `kg_invalidate` MCP tool is still firming up. |
+| `minConfidence` | `number` | `0.6` | Minimum structured-extractor confidence for a learned fact to be written to the KG. |
 
 When to tune:
 
 - Set `autoLearn: false` for read-only sessions (analytics, audits) where you don't want the KG to grow.
 - Lower `batchSize` to `1` for debugging — every extracted fact flushes immediately so you can watch them appear in the KG in real time.
 - Set `invalidateOnConflict: true` once your MemPalace install reliably handles `kg_invalidate` (see [docs/architecture.md](docs/architecture.md#kg-invalidation)).
+
+---
+
+## `learning`
+
+Controls which message roles can feed automatic KG learning. This is separate from the `kg` batch/write knobs.
+
+| Field | Type | Default | What it controls |
+|-------|------|---------|------------------|
+| `fromUser` | `boolean` | `true` | Learn structured facts from user messages. |
+| `fromAssistant` | `boolean` | `false` | Learn structured facts from assistant output. Disabled by default to reduce self-poisoning risk. |
+| `fromSystem` | `boolean` | `false` | Learn structured facts from system messages. Disabled by default. |
+
+When to tune:
+
+- Leave `fromAssistant` off unless you explicitly want assistant-authored statements to enter durable KG memory.
+- Use explicit `remember ...` commands for high-confidence user-provided facts.
 
 ---
 
@@ -217,6 +236,7 @@ Sandbox for file reads exposed via the OpenClaw memory runtime API. This is the 
 | Field | Type | Default | What it controls |
 |-------|------|---------|------------------|
 | `allowedReadRoots` | `string[]` | `["~/.mempalace", "~/.openclaw/workspace"]` | Allowlist of directory roots. A `readFile` call is rejected unless the resolved real path falls under one of these roots (after symlink resolution). |
+| `allowedWriteRoots` | `string[]` | `[]` | Allowlist of directory roots for runtime `writeFile`. Empty by default, so file writes are denied unless explicitly enabled. |
 
 Path resolution semantics:
 
@@ -229,6 +249,7 @@ When to tune:
 
 - **Add a root** if you want the agent to read from a project-specific directory (e.g. `~/Projects/myrepo/notes`). Use absolute paths or `~`-prefixed paths.
 - **Replace the whole list** with `[]` to disable file reads entirely. The plugin will still inject memory; only the explicit `readFile` runtime API is locked out.
+- **Add `allowedWriteRoots` only for directories where agent writes are explicitly acceptable.** The default deny-all behavior is intentional.
 
 ⚠️ Don't add `~` or `/` here. The whole point of the allowlist is to be a small, audited set of directories.
 
@@ -382,7 +403,14 @@ A complete config showing every option at its default value, with comments on th
             "autoLearn": true,
             "batchSize": 5,
             "flushIntervalMs": 30000,
-            "invalidateOnConflict": false
+            "invalidateOnConflict": false,
+            "minConfidence": 0.6
+          },
+
+          "learning": {
+            "fromUser": true,
+            "fromAssistant": false,
+            "fromSystem": false
           },
 
           "prefetch": {
@@ -397,7 +425,8 @@ A complete config showing every option at its default value, with comments on th
           },
 
           "memoryRuntime": {
-            "allowedReadRoots": ["~/.mempalace", "~/.openclaw/workspace"]
+            "allowedReadRoots": ["~/.mempalace", "~/.openclaw/workspace"],
+            "allowedWriteRoots": []
           },
 
           "hotCache": {
