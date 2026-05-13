@@ -8,24 +8,63 @@ A full-lifecycle memory plugin for OpenClaw, powered by MemPalace.
 
 ## What it does
 
-Lets an OpenClaw agent remember things across conversations — without the speed and token cost of the current memory plugin.
+Lets an OpenClaw agent remember things across conversations with a live MemPalace-backed recall, learning, and persistence loop.
 
-remempalace sits in OpenClaw's memory slot and handles three jobs:
+remempalace sits in OpenClaw's exclusive `memory` plugin slot and handles three jobs:
 
-- **Recall** — pulls relevant facts from MemPalace before each turn
-- **Learn** — captures new facts from the conversation as it happens
-- **Persist** — writes a session summary at the end so the next session knows what happened
+- **Recall** — pulls relevant KG facts and semantic memory from MemPalace before each turn.
+- **Learn** — captures conservative facts from the conversation and writes them to the knowledge graph.
+- **Persist** — writes session summaries to the MemPalace diary so future sessions can recover what happened.
+
+It also exposes agent-callable tools for search, explicit notes, recent diary entries, and health/status when the OpenClaw host supports plugin tools.
 
 ## Why it exists
 
-An alternative to memory-core.
+OpenClaw's built-in `memory-core` is a strong transparent default: durable memory is mostly Markdown files (`MEMORY.md`, `memory/YYYY-MM-DD.md`, optional `DREAMS.md`) plus an index/search layer and optional dreaming-based promotion.
 
-- A **persistent connection** to MemPalace (no per-turn process spawning)
-- An **in-memory LRU cache** so repeat queries are instant (<5ms)
-- **Tiered injection** that only loads what's actually relevant
-- **Two-way memory** — reads *and* writes conservative learned facts over time
-- **Identity injection** — loads SOUL.md + IDENTITY.md once per session at zero latency
-- **Timeline queries** — detects "what happened yesterday?" and injects a chronological diary/KG summary
+That file-first model is easy to inspect and repair, but long-running agents can run into predictable problems: messy Markdown, delayed promotion, token creep from broad context loading, search misses, and weak structure around entities and relationships.
+
+remempalace explores a different shape: **memory as a live runtime service**.
+
+- A **persistent connection** to MemPalace avoids per-turn process startup.
+- An **in-memory LRU/hot cache** makes repeated queries fast.
+- **Tiered injection** loads only the memory bundle that appears relevant to the current turn.
+- **Two-way memory** reads from and writes conservative learned facts to a KG.
+- **Identity injection** loads SOUL.md + IDENTITY.md once per session at low latency.
+- **Timeline queries** detect prompts like "what happened yesterday?" and inject diary/KG context.
+- **Operational status** reports MCP readiness, diary persistence, circuit breakers, latency, and cache behavior.
+
+## remempalace vs memory-core
+
+remempalace is not trying to make `memory-core` obsolete. It is testing whether OpenClaw memory can feel more like part of the live agent runtime instead of primarily a Markdown-and-index workflow.
+
+| `memory-core` pain point | remempalace approach |
+| --- | --- |
+| Markdown can become messy, duplicated, or stale. | Store concise facts in a KG and session history in diary entries. |
+| Recall can require loading or searching broad files. | Inject only a small ranked bundle of relevant facts/results. |
+| Important facts depend on the agent remembering to edit files. | Learn conservative facts between turns and write them to the KG. |
+| Exact file/search wording can miss entity relationships. | Query entities and relations through the KG as well as semantic search. |
+| Dreaming/promotion can be delayed or operationally complex. | Use an always-on recall/learn/persist lifecycle per session. |
+| Process startup and repeated backend calls can add latency. | Keep a warm MCP connection and cache repeated lookups. |
+| “What happened recently?” questions are awkward in raw files. | Use diary plus KG timeline recall. |
+
+Use `memory-core` when you want the most stable, transparent, file-first memory system with minimal dependencies. Use remempalace when you want to test KG facts, diary persistence, tiered recall, and lower prompt overhead for long-lived agents.
+
+## Current state and direction
+
+remempalace is release-candidate quality and actively tested. The current plugin has working before-turn recall, KG writes, diary persistence checks, status reporting, caching, tiered recall modes, and agent tools.
+
+It is still not a finished replacement for `memory-core`. The main tradeoff is operational complexity: remempalace depends on the OpenClaw plugin, the MemPalace Python backend, MCP transport, and diary persistence all behaving correctly.
+
+The project is trying to become a drop-in memory slot that feels boringly reliable:
+
+1. Install and configure it with minimal steps.
+2. Ask the agent to remember something.
+3. Come back later and get accurate recall without bloating context.
+4. Verify health with one status command.
+5. Inspect, edit, and eventually forget memory safely.
+
+Near-term priorities are packaging, status clarity, smoke tests, inspection tools, safe lifecycle controls, and migration/interop with existing `MEMORY.md` and daily notes.
 
 ## Architecture
 
