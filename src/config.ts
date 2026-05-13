@@ -45,6 +45,11 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
     invalidateOnConflict: false,
     minConfidence: 0.6,
   },
+  learning: {
+    fromUser: true,
+    fromAssistant: false,
+    fromSystem: false,
+  },
   prefetch: { diaryCount: 3, identityEntities: true },
   identity: {
     soulPath: `${homedir()}/SOUL.md`,
@@ -94,6 +99,7 @@ export function mergeConfig(
       localDir: expandTilde(user.diary?.localDir ?? DEFAULT_CONFIG.diary.localDir),
     },
     kg: { ...DEFAULT_CONFIG.kg, ...user.kg },
+    learning: { ...DEFAULT_CONFIG.learning, ...user.learning },
     prefetch: { ...DEFAULT_CONFIG.prefetch, ...user.prefetch },
     identity,
     memoryRuntime,

@@ -1,10 +1,10 @@
 # Current Refactor Status
 
-Updated: 2026-05-12T18:10:00-04:00
+Updated: 2026-05-12T21:36:00-04:00
 
 ## Summary
 
-The remempalace refactor has completed Phase 0, Phase 1, and Phase 2. Phase 3 is underway and the low-risk extraction slices completed so far are covered by tests.
+The remempalace refactor has completed Phases 0–4. Phases 5–7 remain.
 
 Current default gate:
 
@@ -16,16 +16,8 @@ npm test
 Latest observed default test result:
 
 ```text
-Test Files  34 passed | 2 skipped (36)
-Tests       472 passed | 6 skipped (478)
-```
-
-Latest corrective gate after addressing blocking concerns:
-
-```text
-git diff --check  passed
-npm run lint      passed
-npm test          34 passed | 2 skipped; 472 passed | 6 skipped
+Test Files  36 passed | 2 skipped (38)
+Tests       518 passed | 6 skipped (524)
 ```
 
 ## Completed
@@ -85,14 +77,22 @@ Known MCP capability field names such as `hasDiaryWrite`, `hasDiaryRead`, and `h
 
 The worktree contains many modified files plus untracked docs, adapter/port/service files, and new tests from the refactor. These are expected in the current slice. Do not revert unrelated untracked files.
 
-## Remaining Phase 3 Work
+## Phase 3 Completion
 
-- Persist a small hot health/status cache across plugin restarts to reduce cold-start status latency.
-- Document the current recall/cache configuration surface in `CONFIGURATION.md`, `INSTALL.md`, and smoke-test notes.
+- Added `src/services/health-cache-store.ts` plus wiring in `src/index.ts`: cold-start health hint loaded best-effort, snapshot flushed on `gateway_stop`, 10-minute stale TTL, file lives next to the hot recall cache, gated by `cfg.hotCache.enabled`. Covered by `tests/health-cache-store.test.ts`.
+- Fast-path configuration documented in `CONFIGURATION.md` (`cache.bundleTtlMs`, `injection.fastRaceMs`, `hotCache.*`, recall modes, 1500ms shared prompt-path deadline, 500ms diary timeouts). Smoke-test doc `docs/openclaw-smoke-test.md` extended with recall-mode and hot-cache-persistence sections.
+
+## Phase 4 Completion
+
+- Added `src/services/learning-service.ts`. Public surface: `ingestTurn(text, role)` — applies role gate, runs structured fact extraction, dedups, enqueues via the existing batcher.
+- Explicit role policy via `cfg.learning.fromUser` (default `true`), `cfg.learning.fromAssistant` (`false`), `cfg.learning.fromSystem` (`false`). The `llm_output` hook in `src/index.ts` reads `cfg.learning.fromAssistant` as the single source of truth; legacy `cfg.kg.learnFromAssistant` is retained in types/defaults for backward compat.
+- `remember <X>` enqueued as a high-confidence user-note fact with its own dedup key. `forget <X>` is logged-only this slice — triple resolution against existing KG entries needs a recall-path search and is deferred (documented inline).
+- `src/index.ts` shrank by ~41 lines (removed inline `learnedKgKeys` set, `rememberLearnedKgKey`, `learnKgFactsFromText`, and inline memory-command logging).
+- New tests in `tests/learning-service.test.ts` cover extraction thresholds, dedup, role gating, and remember/forget behavior.
 
 ## Next Recommended Slice
 
-Update configuration and smoke-test docs for the new fast-path settings (`cache.bundleTtlMs`, `injection.fastRaceMs`, hot recall cache persistence, and recall modes) before moving into Phase 4 learning extraction.
+Begin Phase 5 — OpenClaw runtime adapter cleanup. Ensure `MempalaceMemoryRuntime` uses the `MemPalaceRepository` port (not raw MCP), align OpenClaw memory runtime methods to consistent MemPalace operations, and enforce read roots / write safety at the adapter boundary.
 
 ## Newly Added Backlog (Speed + Intuition)
 

@@ -82,6 +82,14 @@ export interface RemempalaceConfig {
     invalidateOnConflict: boolean;
     minConfidence: number;
   };
+  learning: {
+    /** Extract KG facts from user turns. Default: true. */
+    fromUser: boolean;
+    /** Extract KG facts from assistant turns. Default: false (avoid self-poisoning). */
+    fromAssistant: boolean;
+    /** Extract KG facts from system turns. Default: false (restricted). */
+    fromSystem: boolean;
+  };
   prefetch: {
     diaryCount: number;
     identityEntities: boolean;

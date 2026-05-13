@@ -85,3 +85,31 @@ remempalace ships_with tiered KG-first recall
 ```
 
 Expected: the agent can answer with the stored object when asked what remempalace ships with. If not, see `TROUBLESHOOTING.md#recall-returns-nothing`.
+
+## 7. Recall mode classification (optional)
+
+Test that the plugin correctly selects cheap/cheap+kg1/full recall based on prompt content:
+
+- **Cheap** (no backend calls): "ok", "thanks", "got it", "looks good" → agent should respond with no memory context or only identity.
+- **Cheap+kg1** (single KG query): "continue", "next step" (after an entity-bearing turn) → agent should use memory but with reduced latency vs. full recall.
+- **Full** (search + KG): "what did we discuss about X?", "remind me", questions with `?` → agent should have rich memory context.
+
+Enable `REMEMPALACE_DEBUG=1` to watch mode selection:
+
+```bash
+export REMEMPALACE_DEBUG=1
+openclaw stop && openclaw start
+tail -f /tmp/remempalace-last-inject.log
+# In the agent: ask different types of prompts and watch the decision logs
+```
+
+## 8. Hot cache persistence (optional)
+
+Test that cache survives a plugin restart:
+
+1. Have a multi-turn conversation covering 3–4 distinct topics.
+2. Restart the gateway: `openclaw gateway restart`.
+3. Repeat a similar prompt from an earlier topic (e.g., "tell me more about X" right after restarting).
+4. Enable `REMEMPALACE_DEBUG=1` and check `/tmp/remempalace-last-inject.log` for a cache hit vs. a fresh backend call.
+
+Expected: the reused bundle should appear in the inject log with a short latency, indicating the hot cache was loaded from disk.

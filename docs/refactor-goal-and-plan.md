@@ -157,13 +157,15 @@ MemPalace MCP server
 - [x] Reuse precomputed recall across normalized-intent follow-ups (whitespace/case normalized prompt key) with short TTL (2-5 min).
 - [x] Reduce prompt-path token counting overhead by precomputing static token costs for fixed headers/prefixes.
 - [x] Harden hot recall cache invalidation bookkeeping by pruning stale reverse-index entries, preserving fresher in-session bundles during warm import, and invalidating KG/bundle cache entries by normalized alias roots.
+- [x] Persist a small hot health/status cache across plugin restarts (`src/services/health-cache-store.ts`, gateway_stop flush, 10 min stale TTL, gated by `cfg.hotCache.enabled`).
+- [x] Document fast-path settings in `CONFIGURATION.md` and the smoke-test doc (`cache.bundleTtlMs`, `injection.fastRaceMs`, `hotCache.*`, recall modes, 1500ms shared deadline, 500ms diary timeouts).
 
 ### Phase 4 — Extract learning
 
-- [ ] Move KG extraction/dedup/batching into `LearningService`.
-- [ ] Make source-role policy explicit: user default enabled, assistant disabled by default, system restricted.
-- [ ] Add explicit handling for user memory commands (`remember`, `forget`) or document that they are logged only.
-- [ ] Gate: extraction thresholds and dedup tests green.
+- [x] Move KG extraction/dedup/batching into `LearningService`.
+- [x] Make source-role policy explicit: user default enabled, assistant disabled by default, system restricted.
+- [x] Add explicit handling for user memory commands (`remember` enqueued as high-confidence user fact; `forget` is logged-only this slice — triple resolution deferred).
+- [x] Gate: extraction thresholds and dedup tests green.
 
 ### Phase 5 — OpenClaw runtime adapter cleanup
 
@@ -231,9 +233,9 @@ The refactor is successful if:
 
 - Created: 2026-05-11
 - Owner: main OpenClaw assistant session
-- Last updated: 2026-05-12T18:10:00-04:00
-- Status: Phase 0, Phase 1, and Phase 2 complete. Phase 3 extraction is partially complete: `RecallService`, `PromptInjectionService`, exactly-once hook/builder coverage, source-label snapshots, low-semantic recall skips, two-tier recall with cheap diary-prefetch context, `cheap+kg1` continuation recall, normalized-intent `llm_input` recall precompute reuse, a 1500ms shared prompt-path memory deadline, KG fanout/dedup controls, timeout-only negative caching, hot recall cache import/export/invalidation hardening, bounded tiered-injection formatting, and static wrapper token-cost precomputation are in place.
-- Current gate: `npm run lint` and `npm test` pass in the default suite. Latest local full test run observed 472 passed / 6 skipped across 36 files.
+- Last updated: 2026-05-12T21:36:00-04:00
+- Status: Phases 0–4 complete. Phase 3 closed with hot health/status cache persistence and fast-path docs. Phase 4 closed with `LearningService` (`src/services/learning-service.ts`), explicit role policy (`cfg.learning.fromUser|fromAssistant|fromSystem`), and `remember <X>` enqueue (`forget` logged-only, triple resolution deferred).
+- Current gate: `npm run lint` and `npm test` pass in the default suite. Latest local full test run observed 518 passed / 6 skipped across 36 test files (38 total including 2 skipped).
 - Boundary check: raw `callTool(` usage is isolated to `src/adapters/mcp-mempalace-repository.ts`.
 - Handoff details: see `docs/current-refactor-status.md`.
-- Immediate next task: update configuration and smoke-test docs for the new fast-path settings before moving into Phase 4 learning extraction.
+- Immediate next task: Phase 5 — route `MempalaceMemoryRuntime` through the `MemPalaceRepository` port, align OpenClaw memory runtime methods to consistent MemPalace operations, and enforce read-roots / write-safety at the adapter boundary.

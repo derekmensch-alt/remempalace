@@ -1,7 +1,14 @@
 import { promises as fs } from "node:fs";
+import { dirname, join } from "node:path";
 import { mergeConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { loadHotCache, saveHotCache } from "./recall-cache-store.js";
+import {
+  loadHealthCache,
+  saveHealthCache,
+  buildHealthSnapshot,
+  type LoadedHealthCache,
+} from "./services/health-cache-store.js";
 
 const DEBUG_PATH = "/tmp/remempalace-last-inject.log";
 async function debugLog(label: string, data: unknown): Promise<void> {
@@ -24,7 +31,6 @@ import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
 import { summarizeSession } from "./diary.js";
 import { KgBatcher } from "./kg.js";
-import { extractStructuredFacts, extractMemoryCommands } from "./structured-extractor.js";
 import { prefetchWakeUp } from "./prefetch.js";
 import { HeartbeatWarmer } from "./heartbeat.js";
 import { loadIdentityContext } from "./identity.js";
@@ -33,7 +39,7 @@ import { isTimelineQuery, queryTimeline } from "./timeline.js";
 import { MempalaceMemoryRuntime } from "./memory-runtime.js";
 import { buildStatusReport, type LastRecallStatus } from "./status-command.js";
 import { Metrics } from "./metrics.js";
-import { DiaryReconciler } from "./diary-replay.js";
+import { DiaryReconciler, type ReplayResult } from "./diary-replay.js";
 import { McpMemPalaceRepository } from "./adapters/mcp-mempalace-repository.js";
 import { DiaryService } from "./services/diary-service.js";
 import {
@@ -41,6 +47,7 @@ import {
   PromptInjectionService,
 } from "./services/prompt-injection-service.js";
 import { RecallService } from "./services/recall-service.js";
+import { LearningService } from "./services/learning-service.js";
 
 interface SessionMessage {
   role?: string;
@@ -166,20 +173,13 @@ export function stageBudgetMs(
   return Math.max(0, Math.min(deadline.remainingMs(), Math.max(0, stageCapMs)));
 }
 
-export type KgFactSourceRole = "user" | "assistant" | "system";
-
-export function kgConfidenceThresholdForSource(
-  baseThreshold: number,
-  sourceRole: KgFactSourceRole,
-): number {
-  if (sourceRole === "assistant") return Math.max(baseThreshold, 0.8);
-  if (sourceRole === "system") return Math.max(baseThreshold, 0.7);
-  return baseThreshold;
-}
-
-export function kgSourceClosetForRole(sourceRole: KgFactSourceRole): string {
-  return `openclaw:${sourceRole}`;
-}
+export type {
+  KgFactSourceRole,
+} from "./services/learning-service.js";
+export {
+  kgConfidenceThresholdForSource,
+  kgSourceClosetForRole,
+} from "./services/learning-service.js";
 
 function extractText(msg: { role?: string; content?: unknown }): string {
   const c = msg.content;
@@ -291,6 +291,49 @@ const plugin = {
       minIntervalMs: 5 * 60 * 1000,
     });
 
+    // Health cache: path derived from hotCache path directory.
+    const healthCachePath = join(dirname(cfg.hotCache.path), "health-cache.json");
+    // Mutable probe/replay state — updated by the init path, consumed by gateway_stop flush.
+    let lastHealthProbeAt: number | null = null;
+    let lastHealthProbeReason: string | null = null;
+    let lastHealthReplay: ReplayResult | null = null;
+    // Cold-start hint loaded on register — available immediately for /remempalace status.
+    let coldStartHealth: LoadedHealthCache | null = null;
+
+    if (cfg.hotCache.enabled) {
+      // Fire-and-forget health cache warm load.
+      loadHealthCache(healthCachePath)
+        .then((loaded) => {
+          if (loaded) {
+            coldStartHealth = loaded;
+            metrics.inc("health_cache.loaded");
+          }
+        })
+        .catch(() => metrics.inc("health_cache.load_failed"));
+    }
+
+    const flushHealthCache = async (): Promise<void> => {
+      try {
+        const snapshot = buildHealthSnapshot({
+          mcpReady: mcp.isReady(),
+          capabilities: {
+            canWriteDiary: mempalaceRepository.canWriteDiary,
+            canReadDiary: mempalaceRepository.canReadDiary,
+            canInvalidateKg: mempalaceRepository.canInvalidateKg,
+            canPersistDiary: mempalaceRepository.canPersistDiary,
+          },
+          diaryPersistenceState: mempalaceRepository.diaryPersistenceState,
+          lastProbeAt: lastHealthProbeAt,
+          lastProbeReason: lastHealthProbeReason,
+          lastReplay: lastHealthReplay,
+        });
+        await saveHealthCache(healthCachePath, snapshot);
+        metrics.inc("health_cache.flushed");
+      } catch {
+        metrics.inc("health_cache.flush_failed");
+      }
+    };
+
     // Hot cache: warm-load on register, periodic flush, final flush on stop.
     let hotCacheInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -349,9 +392,15 @@ const plugin = {
             replayOnStart: cfg.diary.replayOnStart,
             reconciler: diaryReconciler,
             onProbeError: (err) => {
+              lastHealthProbeAt = Date.now();
+              lastHealthProbeReason = `probe-error: ${err.message}`;
               logger.warn(`diary persistence probe failed: ${err.message}`);
             },
             onProbeResult: (result) => {
+              lastHealthProbeAt = Date.now();
+              lastHealthProbeReason = result.verified
+                ? `verified: ${result.state}`
+                : `unverified: ${result.state}${result.error ? ` (${result.error})` : ""}`;
               if (!result.verified) {
                 logger.warn(
                   `diary persistence unverified: state=${result.state}${result.error ? ` error=${result.error}` : ""}`,
@@ -359,6 +408,7 @@ const plugin = {
               }
             },
             onReplayResult: (r) => {
+              lastHealthReplay = r;
               if (r.attempted > 0) {
                 logger.info(
                   `diary replay: ${r.succeeded}/${r.attempted} succeeded, ${r.failed} failed`,
@@ -422,7 +472,6 @@ const plugin = {
     const hookFiredSessions = new Set<string>();
     const sessionMessages = new Map<string, SessionMessage[]>();
     const precomputedRecallBySession = new Map<string, PrecomputedRecall>();
-    const learnedKgKeys = new Set<string>();
     let lastRecall: LastRecallStatus | null = null;
     const sessionStartCache = new Map<
       string,
@@ -452,42 +501,15 @@ const plugin = {
         })
       : null;
 
-    const rememberLearnedKgKey = (key: string): boolean => {
-      if (learnedKgKeys.has(key)) return false;
-      learnedKgKeys.add(key);
-      if (learnedKgKeys.size > 2000) {
-        const oldest = learnedKgKeys.values().next().value;
-        if (typeof oldest === "string") learnedKgKeys.delete(oldest);
-      }
-      return true;
-    };
-
-    const learnKgFactsFromText = (text: string, sourceRole: KgFactSourceRole) => {
-      if (!kgBatcher || text.length < 5) return;
-      const all = extractStructuredFacts(text);
-      const minConfidence = kgConfidenceThresholdForSource(cfg.kg.minConfidence, sourceRole);
-      const sourceCloset = kgSourceClosetForRole(sourceRole);
-      let dropped = 0;
-      for (const f of all) {
-        metrics.inc(`kg.facts.extracted.${f.category}`);
-        metrics.inc(`kg.facts.source.${sourceRole}`);
-        if (f.confidence < minConfidence) {
-          dropped += 1;
-          continue;
-        }
-        const sourceKey = `${sourceRole}|${f.subject}|${f.predicate}|${f.object}|${f.source_span ?? ""}`;
-        if (!rememberLearnedKgKey(sourceKey)) continue;
-        metrics.inc("kg.facts.extracted");
-        kgBatcher.add({
-          subject: f.subject,
-          predicate: f.predicate,
-          object: f.object,
-          valid_from: f.valid_from,
-          source_closet: sourceCloset,
-        });
-      }
-      if (dropped > 0) metrics.inc("kg.facts.dropped_low_confidence", dropped);
-    };
+    const learningService = kgBatcher
+      ? new LearningService({
+          batcher: kgBatcher,
+          minConfidence: cfg.kg.minConfidence,
+          config: cfg.learning,
+          metrics,
+          logger,
+        })
+      : null;
 
     if (typeof api.on === "function") {
       api.on("session_start", async (_event: unknown, ctx: unknown) => {
@@ -518,16 +540,11 @@ const plugin = {
         if (ev.historyMessages) {
           const messages = ev.historyMessages as SessionMessage[];
           sessionMessages.set(key, messages);
-          for (const message of messages) {
-            if (message.role !== "user") continue;
-            const clean = stripRuntimeInjectionBlocks(extractText(message));
-            learnKgFactsFromText(clean, "user");
-            const cmds = extractMemoryCommands(clean);
-            if (cmds.remember.length > 0) {
-              logger.info(`memory commands — remember: ${cmds.remember.join(" | ")}`);
-            }
-            if (cmds.forget.length > 0) {
-              logger.info(`memory commands — forget: ${cmds.forget.join(" | ")}`);
+          if (learningService) {
+            for (const message of messages) {
+              if (message.role !== "user") continue;
+              const clean = stripRuntimeInjectionBlocks(extractText(message));
+              learningService.ingestTurn(clean, "user");
             }
           }
           const prompt = latestUserPrompt(messages);
@@ -584,12 +601,12 @@ const plugin = {
         });
       }
 
-      if (kgBatcher && cfg.kg.learnFromAssistant) {
+      if (learningService && cfg.learning.fromAssistant) {
         api.on("llm_output", (event: unknown) => {
           const ev = event as { assistantTexts?: string[] };
           if (!ev.assistantTexts) return;
           for (const text of ev.assistantTexts) {
-            learnKgFactsFromText(text, "assistant");
+            learningService.ingestTurn(text, "assistant");
           }
         });
       }
@@ -936,6 +953,7 @@ const plugin = {
           hotCacheInterval = null;
         }
         if (cfg.hotCache.enabled) await flushHotCache();
+        if (cfg.hotCache.enabled) await flushHealthCache();
         await mcp.stop();
       });
     }
@@ -983,19 +1001,41 @@ const plugin = {
         acceptsArgs: false,
         handler: async () => {
           const diaryStatus = await diaryService.getStatus({ reconciler: diaryReconciler });
-          return {
-            text: buildStatusReport({
-              mcpReady: mcp.isReady(),
-              canWriteDiary: mempalaceRepository.canWriteDiary,
-              canReadDiary: mempalaceRepository.canReadDiary,
-              canInvalidateKg: mempalaceRepository.canInvalidateKg,
-              searchCache: searchCache.stats(),
-              kgCache: kgCache.stats(),
-              metrics: metrics.snapshot(),
-              diary: diaryStatus,
-              lastRecall,
-            }),
-          };
+          const liveReport = buildStatusReport({
+            mcpReady: mcp.isReady(),
+            canWriteDiary: mempalaceRepository.canWriteDiary,
+            canReadDiary: mempalaceRepository.canReadDiary,
+            canInvalidateKg: mempalaceRepository.canInvalidateKg,
+            searchCache: searchCache.stats(),
+            kgCache: kgCache.stats(),
+            metrics: metrics.snapshot(),
+            diary: diaryStatus,
+            lastRecall,
+          });
+          // Append cold-start health hint when MCP hasn't init'd yet and a snapshot exists.
+          if (!mcp.isReady() && coldStartHealth) {
+            const h = coldStartHealth.snapshot;
+            const age = Math.round((Date.now() - h.savedAt) / 1000);
+            const staleMark = coldStartHealth.stale ? " [stale]" : "";
+            const hintLines = [
+              "",
+              `Cold-start health hint (${age}s ago${staleMark}):`,
+              `  mcp_ready: ${h.mcpReady}`,
+              `  diary_persistence: ${h.diaryPersistenceState}`,
+              `  capabilities: write=${h.capabilities.canWriteDiary} read=${h.capabilities.canReadDiary} kg_invalidate=${h.capabilities.canInvalidateKg} persist=${h.capabilities.canPersistDiary}`,
+            ];
+            if (h.lastProbeAt !== null) {
+              const probeAge = Math.round((Date.now() - h.lastProbeAt) / 1000);
+              hintLines.push(`  last_probe: ${probeAge}s ago — ${h.lastProbeReason ?? "unknown"}`);
+            }
+            if (h.lastReplay) {
+              hintLines.push(
+                `  last_replay: ${h.lastReplay.succeeded}/${h.lastReplay.attempted} succeeded`,
+              );
+            }
+            return { text: liveReport + "\n" + hintLines.join("\n") };
+          }
+          return { text: liveReport };
         },
       });
     }
