@@ -36,10 +36,10 @@ User config is **shallow-merged** into the defaults at startup. Each top-level s
 ```ts
 interface RemempalaceConfig {
   mcpPythonBin: string;
-  cache:          { capacity: number; ttlMs: number; kgTtlMs: number };
+  cache:          { capacity: number; ttlMs: number; kgTtlMs: number; bundleTtlMs: number };
   injection:      { maxTokens: number; budgetPercent: number; similarityThreshold: number;
                     useAaak: boolean; knownEntities: string[];
-                    identityMaxTokens: number; rawIdentity: boolean };
+                    identityMaxTokens: number; rawIdentity: boolean; fastRaceMs: number };
   tiers:          { l1Threshold: number; l2Threshold: number; l2BudgetFloor: number };
   diary:          { enabled: boolean; maxEntryTokens: number };
   kg:             { autoLearn: boolean; batchSize: number; flushIntervalMs: number;
@@ -47,6 +47,7 @@ interface RemempalaceConfig {
   prefetch:       { diaryCount: number; identityEntities: boolean };
   identity:       { soulPath: string; identityPath: string; maxChars: number };
   memoryRuntime:  { allowedReadRoots: string[] };
+  hotCache:       { enabled: boolean; path: string; maxEntries: number; flushIntervalMs: number };
 }
 ```
 
@@ -80,12 +81,14 @@ In-memory LRU cache for MemPalace responses. Keeps repeat queries near-zero late
 | `capacity` | `number` | `200` | Max number of cached entries. The cache is shared across `search`, `kg_query`, `diary_read`, and identity reads. |
 | `ttlMs` | `number` | `300000` (5 min) | TTL for search and diary results. Anything older is treated as a miss and re-fetched. |
 | `kgTtlMs` | `number` | `600000` (10 min) | Separate TTL for KG queries. KG facts change less often than free-text search results, so they're cached longer by default. |
+| `bundleTtlMs` | `number` | `180000` (3 min) | TTL for normalized-intent recall bundles. When follow-up prompts have the same semantic intent (after whitespace/case normalization), the recall result is reused within this window. Prevents duplicate `search` + `kg_query` work on near-identical follow-ups. |
 
 When to tune:
 
 - **Lower `ttlMs`** if you care about same-session writes being visible immediately to other agents reading from the same cache.
 - **Raise `capacity`** if you have a large `knownEntities` list and want to avoid eviction churn at the start of every turn.
 - **Set `kgTtlMs` lower than `ttlMs`** if you write to the KG frequently and want fresher reads at the cost of slightly more MCP traffic.
+- **Lower `bundleTtlMs`** if you want fresher recall on every turn; **raise it** if your conversation has many near-identical follow-ups (e.g., "continue", "next step", "go on") and you want to skip redundant backend calls.
 
 ---
 
@@ -102,12 +105,17 @@ Controls how much memory remempalace puts into the prompt and how it's formatted
 | `knownEntities` | `string[]` | `["OpenClaw", "MemPalace", "remempalace", "Anthropic", "Claude"]` | Entities that are *always* considered for KG lookup, even if the NER heuristic doesn't extract them from the user message. **Add the user's name, project names, and key collaborators here.** This is the single most impactful config knob for recall quality. |
 | `identityMaxTokens` | `number` | `150` | Token budget for the SOUL.md/IDENTITY.md block specifically. Separate from `maxTokens` so identity isn't crowded out by recall on long turns. |
 | `rawIdentity` | `boolean` | `false` | If `true`, identity is injected verbatim instead of AAAK-compressed. Useful if your SOUL.md uses syntax that doesn't compress well, or for debugging. |
+| `fastRaceMs` | `number` | `50` | In `before_prompt_build`, this is the window (in ms) during which cheap-tier sources (`cache`, `identity`, `last session`) are allowed to return before the full-recall backend (`search`, `kg_query`) is started. If cheap sources hit within this window, full recall is cancelled and only cheap results are used. Trades latency for completeness: set lower to always wait for full recall, or raise it to prefer cached/cheap sources and skip expensive backend calls. |
+| `budgets.initMs` | `number` | `200` | Sub-budget (ms) for the MCP-ready wait stage of `before_prompt_build`. If exceeded, a warn log is emitted and an `init.overrun` counter is incremented, but execution continues. The total 1500 ms deadline always takes precedence. |
+| `budgets.fetchMs` | `number` | `1100` | Sub-budget (ms) for timeline + full recall (search + KG) stage. Advisory only; overruns increment `fetch.overrun` counter. |
+| `budgets.formatMs` | `number` | `200` | Sub-budget (ms) for tiered injection + token-budget formatting. Advisory only; overruns increment `format.overrun` counter. |
 
 When to tune:
 
 - The most common change is **`knownEntities`**. Default list is generic; the user's own canonical entity names belong here.
 - **Lower `similarityThreshold`** if recall is too thin (`0.18`–`0.22`). **Raise it** if irrelevant facts are sneaking in (`0.30`–`0.35`).
 - **Disable `useAaak`** only when debugging — raw text is easier to read in `/tmp/remempalace-last-inject.log` but eats roughly 2× the tokens.
+- **`fastRaceMs`**: Set to `0` to always run full recall; raise to `100`–`200` ms to prefer cached/cheap sources over backend latency on chatty turns.
 
 ---
 
@@ -226,6 +234,80 @@ When to tune:
 
 ---
 
+## `hotCache`
+
+Persistent on-disk cache of recently recalled bundles. Across plugin restarts and gateway restarts, remempalace imports live hot-cache entries to reduce cold-start latency. Entries expire according to their original TTL, and the health cache (diary persistence state, last probe time) is persisted separately.
+
+| Field | Type | Default | What it controls |
+|-------|------|---------|------------------|
+| `enabled` | `boolean` | `true` | Master switch for hot-cache persistence. If `false`, cache is in-memory only and cleared on plugin shutdown. |
+| `path` | `string` | `~/.mempalace/remempalace/hot-cache.json` | File path where the hot recall cache snapshot is saved. Directory is created if it doesn't exist. `~` is expanded at config merge time. |
+| `maxEntries` | `number` | `50` | Maximum number of normalized-intent recall bundles to persist. When the limit is reached, oldest entries are dropped on flush. |
+| `flushIntervalMs` | `number` | `60000` (60s) | How often the in-memory cache is written to disk. Does not block prompt builds; happens asynchronously in the background. |
+
+Additionally, a separate health snapshot is persisted at `~/.mempalace/remempalace/health-cache.json` with diary persistence state, MCP readiness, capability flags, and last probe timestamp. Health snapshots are stale after 10 minutes and refreshed on each probe.
+
+When to tune:
+
+- Set `enabled: false` if you want a fresh start every session (e.g., in testing or sandboxed environments).
+- **Lower `maxEntries`** if disk space is limited; **raise it** if you have many different conversation contexts and want more hot recall entries to survive a restart.
+- **Raise `flushIntervalMs`** if you restart the gateway very frequently and want to reduce write churn (e.g., `120000` for once every 2 minutes).
+
+---
+
+## `breaker`
+
+Per-backend circuit breaker configuration. When a backend hits its failure threshold within the window, the breaker trips and fast-fails subsequent calls with `BackendUnavailable` during cooldown.
+
+| Field | Type | Default | What it controls |
+|-------|------|---------|------------------|
+| `search.failureThreshold` | `number` | `3` | Number of consecutive failures (within `windowMs`) that trip the search breaker. |
+| `search.windowMs` | `number` | `10000` | Window (ms) over which consecutive failures are counted for search. |
+| `search.cooldownMs` | `number` | `15000` | How long (ms) the search breaker stays open before allowing a trial call. |
+| `kg.failureThreshold` | `number` | `3` | Failure threshold for KG queries. |
+| `kg.windowMs` | `number` | `10000` | Window (ms) for KG failure counting. |
+| `kg.cooldownMs` | `number` | `15000` | Cooldown (ms) for KG breaker. |
+| `diary.failureThreshold` | `number` | `3` | Failure threshold for diary read/write. |
+| `diary.windowMs` | `number` | `10000` | Window (ms) for diary failure counting. |
+| `diary.cooldownMs` | `number` | `15000` | Cooldown (ms) for diary breaker. |
+
+Breaker states:
+- **closed** — normal operation; failures increment counter
+- **open** — fast-fail; all calls throw `BackendUnavailable` until cooldown expires
+- **half-open** — after cooldown, one trial call is allowed; success resets to closed, failure returns to open
+
+When to tune:
+
+- **Lower `failureThreshold`** to trip breakers faster on an unstable backend (e.g., `1` or `2`).
+- **Raise `cooldownMs`** if your backend needs more recovery time between outages.
+- **Lower `windowMs`** to age out failures faster in high-churn environments.
+
+---
+
+## Recall modes and prompt-path deadlines
+
+remempalace uses adaptive recall to keep `before_prompt_build` fast. The plugin automatically classifies user prompts and selects the right recall strategy:
+
+- **cheap** — Skipped for low-semantic acknowledgements (ok, thanks, yes/no), tool follow-up chatter (tests passed, looks good), and short prompts without semantic content. Also used for continuation prompts when there are no extracted entity candidates. Returns empty recall bundle with no backend calls.
+- **cheap+kg1** — Used for continuation prompts (continue, next, keep going, carry on) that have extracted entities. Runs lexical diary prefetch and at most one KG entity query within the fast-race window. Skips semantic search entirely.
+- **full** — Used for question prompts (`?`), explicit prior-context prompts (remember, what did, last session), prompts with extracted entity candidates, and anything else. Runs both KG and semantic search in parallel with a shared 1500 ms budget.
+
+Recall happens in two phases:
+
+1. **Session start prefetch** (`session_start` hook): Diary entries and identity are loaded asynchronously in the background.
+2. **Prompt build** (`before_prompt_build` hook): The plugin allocates a **1500 ms total budget** for timeline reads, full recall (search + KG), and formatting. If MCP init hasn't completed by then, or if recall times out, the plugin degrades gracefully by returning only identity and cheap-tier context.
+
+The **`injection.fastRaceMs`** window (default 50 ms) controls whether cheap-tier sources are used alone or whether expensive full recall is triggered. If cached/identity results return within the race window, full recall is cancelled.
+
+**Diary timeouts**: Diary reads during prefetch and prompt-path work are bounded at 500 ms each. If a diary read or write takes longer, the request is timed out and local JSONL fallback is used (with eventual replay once MCP persistence is verified healthy).
+
+When to tune:
+
+- Lower diary timeout or raise `injection.fastRaceMs` if your MemPalace backend is slow and you want memory injection to finish quickly rather than wait for backend sources.
+- Disable cheap-mode skipping by setting recall thresholds appropriately if you always want full recall regardless of prompt content.
+
+---
+
 ## Environment variables
 
 A handful of behaviors are toggled via env vars in the gateway environment, not via JSON config:
@@ -264,7 +346,8 @@ A complete config showing every option at its default value, with comments on th
           "cache": {
             "capacity": 200,
             "ttlMs": 300000,
-            "kgTtlMs": 600000
+            "kgTtlMs": 600000,
+            "bundleTtlMs": 180000
           },
 
           "injection": {
@@ -275,7 +358,13 @@ A complete config showing every option at its default value, with comments on th
             // ⭐ Most worth customizing — add your name, project names, etc.
             "knownEntities": ["OpenClaw", "MemPalace", "remempalace", "Anthropic", "Claude"],
             "identityMaxTokens": 150,
-            "rawIdentity": false
+            "rawIdentity": false,
+            "fastRaceMs": 50,
+            "budgets": {
+              "initMs": 200,
+              "fetchMs": 1100,
+              "formatMs": 200
+            }
           },
 
           "tiers": {
@@ -309,6 +398,19 @@ A complete config showing every option at its default value, with comments on th
 
           "memoryRuntime": {
             "allowedReadRoots": ["~/.mempalace", "~/.openclaw/workspace"]
+          },
+
+          "hotCache": {
+            "enabled": true,
+            "path": "~/.mempalace/remempalace/hot-cache.json",
+            "maxEntries": 50,
+            "flushIntervalMs": 60000
+          },
+
+          "breaker": {
+            "search": { "failureThreshold": 3, "windowMs": 10000, "cooldownMs": 15000 },
+            "kg": { "failureThreshold": 3, "windowMs": 10000, "cooldownMs": 15000 },
+            "diary": { "failureThreshold": 3, "windowMs": 10000, "cooldownMs": 15000 }
           }
         }
       }

@@ -3,6 +3,11 @@ import { McpClient } from "../src/mcp-client.js";
 import type { McpResponse } from "../src/mcp-client.js";
 
 describe("McpClient", () => {
+  afterEach(async () => {
+    await McpClient.resetSharedForTests();
+    vi.restoreAllMocks();
+  });
+
   it("formats JSON-RPC request correctly", () => {
     const req = McpClient.formatRequest(1, "tools/call", {
       name: "mempalace_search",
@@ -44,6 +49,66 @@ describe("McpClient", () => {
     client.onChunk('{"jsonrpc":"2.0","id":2,"error":{"code":-1,"message":"boom"}}\n');
     await expect(pending).rejects.toThrow("boom");
   });
+
+  it("reuses one shared client for the same python binary", () => {
+    const first = McpClient.shared({ pythonBin: "/usr/bin/python3" });
+    const second = McpClient.shared({ pythonBin: "/usr/bin/python3" });
+    const other = McpClient.shared({ pythonBin: "/opt/mempalace/python" });
+
+    expect(second).toBe(first);
+    expect(other).not.toBe(first);
+  });
+
+  it("coalesces concurrent start calls", async () => {
+    const client = new McpClient({ pythonBin: "/usr/bin/python3" });
+    const rawClient = client as unknown as {
+      pm: { start: ReturnType<typeof vi.fn>; isAlive: ReturnType<typeof vi.fn> };
+      initialize: ReturnType<typeof vi.fn>;
+    };
+    rawClient.pm = {
+      start: vi.fn().mockResolvedValue(undefined),
+      isAlive: vi.fn().mockReturnValue(false),
+    };
+    rawClient.initialize = vi.fn().mockImplementation(async () => {
+      rawClient.pm.isAlive.mockReturnValue(true);
+    });
+
+    await Promise.all([client.start(), client.start(), client.start()]);
+
+    expect(rawClient.pm.start).toHaveBeenCalledTimes(1);
+    expect(rawClient.initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects pending calls immediately when stopped", async () => {
+    const client = new McpClient({ pythonBin: "/usr/bin/python3" });
+    const rawClient = client as unknown as {
+      pm: { stop: ReturnType<typeof vi.fn> };
+      pending: Map<number, unknown>;
+    };
+    rawClient.pm = { stop: vi.fn().mockResolvedValue(undefined) };
+
+    const pending = client.expect(99, 10000);
+    await client.stop();
+
+    await expect(pending).rejects.toThrow("MCP process died");
+    expect(rawClient.pending.size).toBe(0);
+  });
+
+  it("clears pending calls when writeStdin throws before the request is sent", async () => {
+    const client = new McpClient({ pythonBin: "/usr/bin/python3" });
+    const rawClient = client as unknown as {
+      pm: { writeStdin: ReturnType<typeof vi.fn> };
+      pending: Map<number, unknown>;
+    };
+    rawClient.pm = {
+      writeStdin: vi.fn().mockImplementation(() => {
+        throw new Error("stdin closed");
+      }),
+    };
+
+    await expect(client.call("tools/list", {}, 10000)).rejects.toThrow("stdin closed");
+    expect(rawClient.pending.size).toBe(0);
+  });
 });
 
 describe("probeCapabilities", () => {
@@ -55,7 +120,8 @@ describe("probeCapabilities", () => {
     return { jsonrpc: "2.0", id: 1, result: { tools } };
   }
 
-  afterEach(() => {
+  afterEach(async () => {
+    await McpClient.resetSharedForTests();
     vi.restoreAllMocks();
   });
 
@@ -127,11 +193,13 @@ describe("probeCapabilities", () => {
       id: 1,
       result: {},
     });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     await expect(client.probeCapabilities()).resolves.toBeUndefined();
     expect(client.hasDiaryWrite).toBe(false);
     expect(client.hasDiaryRead).toBe(false);
     expect(client.hasKgInvalidate).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/tools\/list returned unexpected shape/i));
   });
 
   it("does not throw and defaults flags to false when tools/list call rejects", async () => {

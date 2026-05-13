@@ -9,7 +9,6 @@ export interface Contradiction {
 }
 
 const SINGLE_CARDINALITY_EXACT = new Set([
-  "is_a",
   "works_at",
   "lives_at",
   "runs_on",
@@ -17,7 +16,6 @@ const SINGLE_CARDINALITY_EXACT = new Set([
   "default_browser",
   "default_editor",
   "favorite_color",
-  "decided_to",
   "chose_over",
 ]);
 

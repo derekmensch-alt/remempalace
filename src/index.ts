@@ -1,6 +1,14 @@
 import { promises as fs } from "node:fs";
+import { dirname, join } from "node:path";
 import { mergeConfig } from "./config.js";
 import { createLogger } from "./logger.js";
+import { loadHotCache, saveHotCache } from "./recall-cache-store.js";
+import {
+  loadHealthCache,
+  saveHealthCache,
+  buildHealthSnapshot,
+  type LoadedHealthCache,
+} from "./services/health-cache-store.js";
 
 const DEBUG_PATH = "/tmp/remempalace-last-inject.log";
 async function debugLog(label: string, data: unknown): Promise<void> {
@@ -15,24 +23,33 @@ async function debugLog(label: string, data: unknown): Promise<void> {
 }
 import { MemoryCache } from "./cache.js";
 import { McpClient } from "./mcp-client.js";
-import { MemoryRouter } from "./router.js";
+import { MemoryRouter, normalizeIntent, type ReadBundle } from "./router.js";
 import type { SearchResult, RemempalaceConfig } from "./types.js";
 import { BudgetManager } from "./budget.js";
 import { buildTieredInjection } from "./tiers.js";
 import { countTokens } from "./token-counter.js";
 import type { KgFact } from "./types.js";
-import { summarizeSession, writeDiaryAsync } from "./diary.js";
+import { summarizeSession } from "./diary.js";
 import { KgBatcher } from "./kg.js";
-import { extractStructuredFacts } from "./structured-extractor.js";
 import { prefetchWakeUp } from "./prefetch.js";
 import { HeartbeatWarmer } from "./heartbeat.js";
 import { loadIdentityContext } from "./identity.js";
 import { compactIdentity } from "./identity-compact.js";
 import { isTimelineQuery, queryTimeline } from "./timeline.js";
 import { MempalaceMemoryRuntime } from "./memory-runtime.js";
-import { buildStatusReport } from "./status-command.js";
+import { buildStatusReport, type LastRecallStatus } from "./status-command.js";
 import { Metrics } from "./metrics.js";
-import { DiaryReconciler, computeDiaryHealth } from "./diary-replay.js";
+import { DiaryReconciler, type ReplayResult } from "./diary-replay.js";
+import { McpMemPalaceRepository } from "./adapters/mcp-mempalace-repository.js";
+import { DiaryService } from "./services/diary-service.js";
+import {
+  buildDefaultRuntimeDisclosure,
+  PromptInjectionService,
+} from "./services/prompt-injection-service.js";
+import { RecallService } from "./services/recall-service.js";
+import { LearningService } from "./services/learning-service.js";
+import { LatencyMetricsService } from "./services/metrics-service.js";
+import { BackendCircuitBreakers } from "./services/circuit-breaker.js";
 
 interface SessionMessage {
   role?: string;
@@ -91,6 +108,81 @@ interface HookContext {
   sessionKey?: string;
 }
 
+interface PrecomputedRecall {
+  prompt: string;
+  candidates: string[];
+  intentKey: string;
+  expiresAt: number;
+  promise: Promise<ReadBundle>;
+}
+
+export const PROMPT_RECALL_DEADLINE_MS = 1500;
+export const PROMPT_STAGE_BUDGETS_MS = {
+  init: 400,
+  fetch: 900,
+  format: 200,
+} as const;
+
+export interface PromptMemoryDeadline {
+  readonly startedAt: number;
+  readonly timeoutMs: number;
+  elapsedMs(): number;
+  remainingMs(): number;
+}
+
+export function createPromptMemoryDeadline(
+  timeoutMs = PROMPT_RECALL_DEADLINE_MS,
+  now: () => number = Date.now,
+): PromptMemoryDeadline {
+  const startedAt = now();
+  return {
+    startedAt,
+    timeoutMs,
+    elapsedMs: () => Math.max(0, now() - startedAt),
+    remainingMs: () => Math.max(0, timeoutMs - Math.max(0, now() - startedAt)),
+  };
+}
+
+export async function withPromptMemoryDeadline<T>(
+  promise: Promise<T>,
+  fallback: T,
+  deadlineOrTimeout: PromptMemoryDeadline | number = PROMPT_RECALL_DEADLINE_MS,
+): Promise<{ value: T; timedOut: boolean }> {
+  const timeoutMs =
+    typeof deadlineOrTimeout === "number"
+      ? deadlineOrTimeout
+      : deadlineOrTimeout.remainingMs();
+  if (timeoutMs <= 0) return { value: fallback, timedOut: true };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ value, timedOut: false })),
+      new Promise<{ value: T; timedOut: boolean }>((resolve) => {
+        timeout = setTimeout(() => resolve({ value: fallback, timedOut: true }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+export const withPromptRecallDeadline = withPromptMemoryDeadline;
+
+export function stageBudgetMs(
+  deadline: PromptMemoryDeadline,
+  stageCapMs: number,
+): number {
+  return Math.max(0, Math.min(deadline.remainingMs(), Math.max(0, stageCapMs)));
+}
+
+export type {
+  KgFactSourceRole,
+} from "./services/learning-service.js";
+export {
+  kgConfidenceThresholdForSource,
+  kgSourceClosetForRole,
+} from "./services/learning-service.js";
+
 function extractText(msg: { role?: string; content?: unknown }): string {
   const c = msg.content;
   if (typeof c === "string") return c;
@@ -121,6 +213,20 @@ function resolvePrompt(ev: PromptBuildEvent): string {
   return "";
 }
 
+function latestUserPrompt(messages: SessionMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role !== "user") continue;
+    const clean = stripRuntimeInjectionBlocks(extractText(message));
+    if (clean.length >= 5) return clean;
+  }
+  return "";
+}
+
+function emptyRecallBundle(): ReadBundle {
+  return { searchResults: [], kgResults: { facts: [] } };
+}
+
 function normalizeKgResult(raw: unknown): KgFact[] {
   if (!raw || typeof raw !== "object") return [];
   if (Array.isArray(raw)) return raw as KgFact[];
@@ -128,6 +234,17 @@ function normalizeKgResult(raw: unknown): KgFact[] {
     return (raw as { facts: KgFact[] }).facts;
   }
   return [];
+}
+
+const RUNTIME_BLOCK_RE =
+  /^##\s+(?:Active Memory Plugin|Memory Context|Identity|System Notes|Timeline Context)\s*\(remempalace\)[^\n]*(?:\n(?!##\s)[^\n]*)*/gm;
+
+export function stripRuntimeInjectionBlocks(text: string): string {
+  return text.replace(RUNTIME_BLOCK_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+export function buildRuntimeDisclosure(): string[] {
+  return buildDefaultRuntimeDisclosure();
 }
 
 const plugin = {
@@ -141,7 +258,18 @@ const plugin = {
     logger.info(`config resolved: pythonBin=${cfg.mcpPythonBin}`);
 
     const metrics = new Metrics();
-    const mcp = new McpClient({ pythonBin: cfg.mcpPythonBin });
+    const latencyMetrics = new LatencyMetricsService();
+    const breakers = new BackendCircuitBreakers({
+      search: cfg.breaker.search,
+      kg: cfg.breaker.kg,
+      diary: cfg.breaker.diary,
+    });
+    const stageBudgets = {
+      init: cfg.injection.budgets.initMs,
+      fetch: cfg.injection.budgets.fetchMs,
+      format: cfg.injection.budgets.formatMs,
+    };
+    const mcp = McpClient.shared({ pythonBin: cfg.mcpPythonBin });
     const searchCache = new MemoryCache<SearchResult[]>({
       capacity: cfg.cache.capacity,
       ttlMs: cfg.cache.ttlMs,
@@ -150,53 +278,218 @@ const plugin = {
       capacity: cfg.cache.capacity,
       ttlMs: cfg.cache.kgTtlMs,
     });
+    const mempalaceRepository = new McpMemPalaceRepository(mcp, {
+      latency: latencyMetrics,
+      breakers,
+    });
     const router = new MemoryRouter({
-      mcp,
+      repository: mempalaceRepository,
       searchCache,
       kgCache,
       similarityThreshold: cfg.injection.similarityThreshold,
       knownEntities: cfg.injection.knownEntities,
       metrics,
+      bundleCacheTtlMs: cfg.cache.bundleTtlMs,
+      bundleCacheCapacity: cfg.cache.capacity,
     });
-
-    const memoryRuntime = new MempalaceMemoryRuntime({
-      mcp,
-      similarityThreshold: cfg.injection.similarityThreshold,
-      allowedReadRoots: cfg.memoryRuntime.allowedReadRoots,
+    const diaryService = new DiaryService({
+      repository: mempalaceRepository,
+      metrics,
+      localDir: cfg.diary.localDir,
     });
+    const promptInjectionService = new PromptInjectionService();
+    const recallService = new RecallService(router);
 
     const diaryReconciler = new DiaryReconciler({
       diaryDir: cfg.diary.localDir,
-      mcp,
+      repository: mempalaceRepository,
       metrics,
+      minIntervalMs: 5 * 60 * 1000,
     });
 
-    const initPromise = mcp
-      .start()
-      .then(async () => {
-        logger.info("MCP client started");
-        await mcp.probeCapabilities().catch(() => {});
-        if (cfg.diary.replayOnStart && mcp.hasDiaryWrite) {
-          diaryReconciler
-            .replay()
-            .then((r) => {
+    // Health cache: path derived from hotCache path directory.
+    const healthCachePath = join(dirname(cfg.hotCache.path), "health-cache.json");
+    // Mutable probe/replay state — updated by the init path, consumed by gateway_stop flush.
+    let lastHealthProbeAt: number | null = null;
+    let lastHealthProbeReason: string | null = null;
+    let lastHealthReplay: ReplayResult | null = null;
+    // Cold-start hint loaded on register — available immediately for /remempalace status.
+    let coldStartHealth: LoadedHealthCache | null = null;
+
+    if (cfg.hotCache.enabled) {
+      // Fire-and-forget health cache warm load.
+      loadHealthCache(healthCachePath)
+        .then((loaded) => {
+          if (loaded) {
+            coldStartHealth = loaded;
+            metrics.inc("health_cache.loaded");
+          }
+        })
+        .catch(() => metrics.inc("health_cache.load_failed"));
+    }
+
+    const flushHealthCache = async (): Promise<void> => {
+      try {
+        const snapshot = buildHealthSnapshot({
+          mcpReady: mcp.isReady(),
+          capabilities: {
+            canWriteDiary: mempalaceRepository.canWriteDiary,
+            canReadDiary: mempalaceRepository.canReadDiary,
+            canInvalidateKg: mempalaceRepository.canInvalidateKg,
+            canPersistDiary: mempalaceRepository.canPersistDiary,
+          },
+          diaryPersistenceState: mempalaceRepository.diaryPersistenceState,
+          lastProbeAt: lastHealthProbeAt,
+          lastProbeReason: lastHealthProbeReason,
+          lastReplay: lastHealthReplay,
+        });
+        await saveHealthCache(healthCachePath, snapshot);
+        metrics.inc("health_cache.flushed");
+      } catch {
+        metrics.inc("health_cache.flush_failed");
+      }
+    };
+
+    // Hot cache: warm-load on register, periodic flush, final flush on stop.
+    let hotCacheInterval: ReturnType<typeof setInterval> | null = null;
+
+    const flushHotCache = async (): Promise<void> => {
+      try {
+        const entries = router.exportHotEntries(cfg.hotCache.maxEntries);
+        await saveHotCache(cfg.hotCache.path, {
+          version: 1,
+          savedAt: Date.now(),
+          entries,
+        });
+        metrics.inc("recall.hot_cache.flushed_entries", entries.length);
+      } catch {
+        metrics.inc("recall.hot_cache.flush_failed");
+      }
+    };
+
+    if (cfg.hotCache.enabled) {
+      // Fire-and-forget warm load; do not block registration.
+      loadHotCache(cfg.hotCache.path)
+        .then((snapshot) => {
+          if (snapshot) {
+            const loaded = router.importHotEntries(snapshot.entries, Date.now());
+            metrics.inc("recall.hot_cache.loaded_entries", loaded);
+          }
+        })
+        .catch(() => metrics.inc("recall.hot_cache.load_failed"));
+
+      hotCacheInterval = setInterval(() => {
+        void flushHotCache();
+      }, cfg.hotCache.flushIntervalMs);
+    }
+
+    // Declared before ensureInit so the closure can call heartbeat.start().
+    const heartbeat = new HeartbeatWarmer({
+      intervalMs: 30 * 60 * 1000,
+      warm: async () => {
+        await prefetchWakeUp(mempalaceRepository, { diaryCount: cfg.prefetch.diaryCount });
+      },
+    });
+
+    // Lazy-start: MCP, heartbeat, and diary replay are deferred until the first
+    // event that needs them.  This avoids spawning a python child process during
+    // plugin registration (e.g. in environments that import the plugin but never
+    // trigger a session).
+    let _initPromise: Promise<void> | null = null;
+
+    function ensureInit(): Promise<void> {
+      if (_initPromise) return _initPromise;
+      _initPromise = mcp
+        .start()
+        .then(async () => {
+          logger.info("MCP client started");
+          await mcp.probeCapabilities().catch(() => {});
+          await diaryService.verifyPersistenceAndReplay({
+            replayOnStart: cfg.diary.replayOnStart,
+            reconciler: diaryReconciler,
+            onProbeError: (err) => {
+              lastHealthProbeAt = Date.now();
+              lastHealthProbeReason = `probe-error: ${err.message}`;
+              logger.warn(`diary persistence probe failed: ${err.message}`);
+            },
+            onProbeResult: (result) => {
+              lastHealthProbeAt = Date.now();
+              lastHealthProbeReason = result.verified
+                ? `verified: ${result.state}`
+                : `unverified: ${result.state}${result.error ? ` (${result.error})` : ""}`;
+              if (!result.verified) {
+                logger.warn(
+                  `diary persistence unverified: state=${result.state}${result.error ? ` error=${result.error}` : ""}`,
+                );
+              }
+            },
+            onReplayResult: (r) => {
+              lastHealthReplay = r;
               if (r.attempted > 0) {
                 logger.info(
                   `diary replay: ${r.succeeded}/${r.attempted} succeeded, ${r.failed} failed`,
                 );
               }
-            })
-            .catch((err: Error) => {
+            },
+            onReplayError: (err) => {
               logger.warn(`diary replay failed: ${err.message}`);
-            });
-        }
-      })
-      .catch((err: Error) => {
-        logger.error(`MCP start failed: ${err.message}`);
-      });
+            },
+          });
+          // Heartbeat starts only once MCP is confirmed alive.
+          heartbeat.start();
+        })
+        .catch((err: Error) => {
+          // Allow retry on next trigger by clearing the cached promise.
+          _initPromise = null;
+          logger.error(`MCP start failed: ${err.message}`);
+        });
+      return _initPromise;
+    }
+
+    // initPromise getter — allows existing `await initPromise` call-sites to keep
+    // working while the actual start is lazy.
+    const initPromise: Promise<void> = {
+      then: (...args: Parameters<Promise<void>["then"]>) => ensureInit().then(...args),
+      catch: (...args: Parameters<Promise<void>["catch"]>) => ensureInit().catch(...args),
+      finally: (...args: Parameters<Promise<void>["finally"]>) => ensureInit().finally(...args),
+      [Symbol.toStringTag]: "Promise",
+    } as Promise<void>;
+
+    const memoryRuntime = new MempalaceMemoryRuntime({
+      mcp,
+      repository: mempalaceRepository,
+      similarityThreshold: cfg.injection.similarityThreshold,
+      allowedReadRoots: cfg.memoryRuntime.allowedReadRoots,
+      allowedWriteRoots: cfg.memoryRuntime.allowedWriteRoots,
+      waitUntilReady: () => initPromise,
+    });
 
     const cachedBySession = new Map<string, string[] | null>();
+    // Tracks sessions for which before_prompt_build has already fired and
+    // returned { prependSystemContext }.  The builder checks this set and
+    // returns [] when the hook already handled injection — preventing the same
+    // block from appearing twice when OpenClaw calls both the hook return AND
+    // the registered builder.
+    //
+    // Two injection paths exist to support both old and new OpenClaw hosts:
+    //   1. before_prompt_build return value (modern path, prependSystemContext)
+    //   2. registerMemoryCapability / registerMemoryPromptSection (legacy path)
+    //
+    // Exactly-once guarantee:
+    //   • Modern host (exposes api.on + honours hook return values):
+    //     before_prompt_build fires -> flag set -> hook return used by OpenClaw
+    //     -> builder returns [] -> single injection via hook return.
+    //   • Legacy host (does not expose api.on at all):
+    //     flag is never set -> builder fires normally -> single injection via
+    //     builder.
+    //
+    // A host that exposes api.on but ignores hook returns is treated as modern
+    // (flag is set, builder is a no-op).  In practice any host that exposes
+    // api.on honours before_prompt_build return values.
+    const hookFiredSessions = new Set<string>();
     const sessionMessages = new Map<string, SessionMessage[]>();
+    const precomputedRecallBySession = new Map<string, PrecomputedRecall>();
+    let lastRecall: LastRecallStatus | null = null;
     const sessionStartCache = new Map<
       string,
       { status: unknown; diaryEntries: unknown[]; identity: { soul: string; identity: string } }
@@ -209,22 +502,31 @@ const plugin = {
     });
 
     const kgBatcher = cfg.kg.autoLearn
-      ? new KgBatcher(mcp, {
+      ? new KgBatcher(mempalaceRepository, {
           batchSize: cfg.kg.batchSize,
           flushIntervalMs: cfg.kg.flushIntervalMs,
           invalidateOnConflict: cfg.kg.invalidateOnConflict,
-          getMcpCaps: () => ({ hasKgInvalidate: mcp.hasKgInvalidate }),
           metrics,
+          onFactsWritten: (facts) => {
+            for (const f of facts) {
+              router.deleteKgEntity(f.subject);
+              router.deleteKgEntity(f.object);
+              router.deleteBundleCacheEntriesForEntity(f.subject);
+              router.deleteBundleCacheEntriesForEntity(f.object);
+            }
+          },
         })
       : null;
 
-    const heartbeat = new HeartbeatWarmer({
-      intervalMs: 30 * 60 * 1000,
-      warm: async () => {
-        await prefetchWakeUp(mcp, { diaryCount: cfg.prefetch.diaryCount });
-      },
-    });
-    heartbeat.start();
+    const learningService = kgBatcher
+      ? new LearningService({
+          batcher: kgBatcher,
+          minConfidence: cfg.kg.minConfidence,
+          config: cfg.learning,
+          metrics,
+          logger,
+        })
+      : null;
 
     if (typeof api.on === "function") {
       api.on("session_start", async (_event: unknown, ctx: unknown) => {
@@ -233,7 +535,7 @@ const plugin = {
         const key = hctx?.sessionKey ?? "default";
         try {
           const [prefetch, identity] = await Promise.all([
-            prefetchWakeUp(mcp, { diaryCount: cfg.prefetch.diaryCount }),
+            prefetchWakeUp(mempalaceRepository, { diaryCount: cfg.prefetch.diaryCount }),
             cfg.prefetch.identityEntities
               ? loadIdentityContext({
                   soulPath: cfg.identity.soulPath,
@@ -253,7 +555,54 @@ const plugin = {
         const hctx = ctx as HookContext;
         const key = hctx?.sessionKey ?? "default";
         if (ev.historyMessages) {
-          sessionMessages.set(key, ev.historyMessages as SessionMessage[]);
+          const messages = ev.historyMessages as SessionMessage[];
+          sessionMessages.set(key, messages);
+          if (learningService) {
+            for (const message of messages) {
+              if (message.role !== "user") continue;
+              const clean = stripRuntimeInjectionBlocks(extractText(message));
+              learningService.ingestTurn(clean, "user");
+            }
+          }
+          const prompt = latestUserPrompt(messages);
+          if (!prompt || prompt.length < 10 || isTimelineQuery(prompt) || recallService.shouldSkipRecall(prompt)) {
+            precomputedRecallBySession.delete(key);
+            return;
+          }
+          const candidates = recallService.extractCandidates(prompt);
+          const recallMode = recallService.selectRecallMode(prompt, candidates);
+          if (recallMode !== "full") {
+            precomputedRecallBySession.delete(key);
+            return;
+          }
+          const intentKey = normalizeIntent(prompt, candidates);
+          const expiresAt = Date.now() + cfg.cache.bundleTtlMs;
+          const existing = precomputedRecallBySession.get(key);
+          if (
+            existing &&
+            existing.intentKey === intentKey &&
+            existing.expiresAt > Date.now()
+          ) {
+            return;
+          }
+          metrics.inc("recall.precompute.started");
+          const promise = initPromise.then(() =>
+            recallService.readBundle(prompt, 5, candidates, { mode: "full" }),
+          );
+          promise.catch((err: Error) => {
+            metrics.inc("recall.precompute.failed");
+            void debugLog("llm_input:recall-precompute-error", {
+              sessionKey: key,
+              error: err.message,
+            });
+          });
+          precomputedRecallBySession.set(key, {
+            prompt,
+            candidates,
+            intentKey,
+            expiresAt,
+            promise,
+          });
         }
       });
 
@@ -265,47 +614,30 @@ const plugin = {
           sessionMessages.delete(key);
           const summary = summarizeSession(messages, { maxTokens: cfg.diary.maxEntryTokens });
           if (!summary) return;
-          writeDiaryAsync(mcp, summary, metrics);
+          diaryService.writeSessionSummaryAsync(summary);
         });
       }
 
-      if (kgBatcher) {
+      if (learningService && cfg.learning.fromAssistant) {
         api.on("llm_output", (event: unknown) => {
           const ev = event as { assistantTexts?: string[] };
           if (!ev.assistantTexts) return;
-          const minConfidence = cfg.kg.minConfidence;
           for (const text of ev.assistantTexts) {
-            const all = extractStructuredFacts(text);
-            const kept: typeof all = [];
-            let dropped = 0;
-            for (const f of all) {
-              metrics.inc(`kg.facts.extracted.${f.category}`);
-              if (f.confidence < minConfidence) {
-                dropped += 1;
-                continue;
-              }
-              kept.push(f);
-            }
-            if (dropped > 0) metrics.inc("kg.facts.dropped_low_confidence", dropped);
-            metrics.inc("kg.facts.extracted", kept.length);
-            for (const f of kept) {
-              kgBatcher.add({
-                subject: f.subject,
-                predicate: f.predicate,
-                object: f.object,
-                valid_from: f.valid_from,
-              });
-            }
+            learningService.ingestTurn(text, "assistant");
           }
         });
       }
 
       api.on("before_prompt_build", async (event: unknown, ctx: unknown) => {
-        await initPromise;
         metrics.inc("recall.invoked");
+        const promptStartedAt = Date.now();
         const ev = event as PromptBuildEvent;
         const hctx = ctx as HookContext & { modelId?: string; contextWindow?: number };
         const sessionKey = hctx?.sessionKey ?? "default";
+        // Mark that this hook has fired for the session.  The builder checks
+        // this flag and returns [] so it never duplicates content that has
+        // already been delivered via prependSystemContext.
+        hookFiredSessions.add(sessionKey);
         cachedBySession.set(sessionKey, null);
         const prompt = resolvePrompt(ev);
         await debugLog("before_prompt_build:enter", {
@@ -320,18 +652,61 @@ const plugin = {
           return;
         }
 
+        const memoryDeadline = createPromptMemoryDeadline();
+        const initBudgetMs = stageBudgetMs(memoryDeadline, stageBudgets.init);
+        const initResult = await withPromptMemoryDeadline(
+          initPromise.then(() => true),
+          false,
+          initBudgetMs,
+        );
+        const initLatencyMs = Math.max(0, Date.now() - promptStartedAt);
+        latencyMetrics.recordLatency("before_prompt_build.init", initLatencyMs);
+        metrics.inc("latency.before_prompt_build.init.ms_total", initLatencyMs);
+        metrics.inc("latency.before_prompt_build.init.count");
+        if (initLatencyMs > stageBudgets.init) {
+          metrics.inc("latency.before_prompt_build.init.overrun");
+          void debugLog("before_prompt_build:init-overrun", {
+            sessionKey,
+            initLatencyMs,
+            budgetMs: stageBudgets.init,
+          });
+          logger.warn(`prompt-path init overran sub-budget: ${initLatencyMs}ms > ${stageBudgets.init}ms`);
+        }
+        if (initResult.timedOut || !initResult.value) {
+          metrics.inc("recall.init.timeout");
+          await debugLog("before_prompt_build:init-timeout", {
+            sessionKey,
+            deadlineMs: memoryDeadline.timeoutMs,
+          });
+          const lines = promptInjectionService.buildRuntimeDisclosure();
+          cachedBySession.set(sessionKey, lines);
+          return { prependSystemContext: lines.join("\n") };
+        }
+
         // Timeline branch: bypass tiered recall for temporal queries
         if (isTimelineQuery(prompt)) {
           metrics.inc("recall.timeline.calls");
           try {
-            const tl = await queryTimeline(mcp, { daysBack: 7 });
-            const lines = [
-              "## Timeline Context (remempalace)",
-              "",
-              ...tl.diary.map((d) => `- ${d.date}: ${d.content.slice(0, 200)}`),
-              ...tl.events.map((e) => `- ${e.date}: ${e.fact}`),
-              "",
-            ];
+            const timelineResult = await withPromptMemoryDeadline(
+              queryTimeline(mempalaceRepository, {
+                daysBack: 7,
+                diaryReadTimeoutMs: Math.min(
+                  500,
+                  stageBudgetMs(memoryDeadline, stageBudgets.fetch),
+                ),
+              }),
+              { diary: [], events: [] },
+              stageBudgetMs(memoryDeadline, stageBudgets.fetch),
+            );
+            const tl = timelineResult.value;
+            if (timelineResult.timedOut) {
+              metrics.inc("recall.timeline.timeout");
+              await debugLog("before_prompt_build:timeline-timeout", {
+                sessionKey,
+                deadlineMs: memoryDeadline.timeoutMs,
+              });
+            }
+            const lines = promptInjectionService.buildTimelineContext(tl);
             cachedBySession.set(sessionKey, lines);
             const block = lines.join("\n");
             await debugLog("before_prompt_build:timeline-returning", {
@@ -344,6 +719,15 @@ const plugin = {
           }
         }
 
+        if (recallService.shouldSkipRecall(prompt)) {
+          metrics.inc("recall.skipped.low_semantic");
+          await debugLog("before_prompt_build:skip-low-semantic", {
+            sessionKey,
+            promptLen: prompt.length,
+          });
+          return;
+        }
+
         const contextWindow = hctx.contextWindow ?? 200000;
         const conversationTokens = ev.messages
           ? ev.messages.reduce((sum, m) => sum + countTokens(extractText(m)), 0)
@@ -351,7 +735,7 @@ const plugin = {
 
         const budget = budgetManager.compute({ conversationTokens, contextWindow });
 
-        if (budget.allowedTiers.length === 0) return;
+        let lines: string[] = promptInjectionService.buildRuntimeDisclosure();
 
         // Compact identity and prepend when L0 tier is allowed
         const start = sessionStartCache.get(sessionKey);
@@ -364,7 +748,8 @@ const plugin = {
             : "";
 
         try {
-          const candidates = router.extractCandidates(prompt);
+          const fetchStartedAt = Date.now();
+          const candidates = recallService.extractCandidates(prompt);
           if (process.env.REMEMPALACE_DEBUG === "1") {
             await debugLog("before_prompt_build:candidates", {
               sessionKey,
@@ -386,26 +771,173 @@ const plugin = {
             );
             await debugLog("before_prompt_build:per-entity-kg", { sessionKey, perEntityKg });
           }
-          const bundle = await router.readBundle(prompt, 5, { entityCandidates: candidates });
-          const kgFacts = normalizeKgResult(bundle.kgResults);
-          const injected = buildTieredInjection({
-            kgFacts,
-            searchResults: bundle.searchResults,
-            budget,
-            tiers: cfg.tiers,
-            useAaak: cfg.injection.useAaak,
-            metrics,
+          const recallMode = recallService.selectRecallMode(prompt, candidates);
+          if (recallMode === "cheap") {
+            metrics.inc("recall.cheap.calls");
+          } else if (recallMode === "cheap+kg1") {
+            metrics.inc("recall.cheap_kg1.calls");
+          }
+          await debugLog("before_prompt_build:recall-mode", {
+            sessionKey,
+            recallMode,
+            candidateCount: candidates.length,
+          });
+          const precomputed = precomputedRecallBySession.get(sessionKey);
+          const intentKey = normalizeIntent(prompt, candidates);
+          const precomputedExpired =
+            precomputed !== undefined && precomputed.expiresAt <= Date.now();
+          if (precomputedExpired) {
+            precomputedRecallBySession.delete(sessionKey);
+          }
+          const canUsePrecomputed =
+            recallMode === "full" &&
+            precomputed !== undefined &&
+            !precomputedExpired &&
+            precomputed.intentKey === intentKey;
+          const bundlePromise = canUsePrecomputed
+            ? precomputed.promise
+            : recallService.readBundle(prompt, 5, candidates, { mode: recallMode });
+          bundlePromise.catch((err: Error) => {
+            void debugLog("before_prompt_build:background-recall-error", {
+              sessionKey,
+              recallMode,
+              error: err.message,
+            });
           });
 
-          const lines: string[] = [];
+          // Fast-race for full-recall mode: only await the bundle for a short
+          // window (fastRaceMs). If the bundle is already resolved (precomputed),
+          // this wins immediately. If the MCP call is still in-flight, we fall
+          // back to cheap mode and let the bundle keep running in the background
+          // — its router.search / router.kgQuery calls will still populate the
+          // LRU caches for the next turn.
+          let bundle: ReadBundle;
+          let usedFastRace = false;
+          let usedCheapKgFallback = false;
+          if (recallMode === "full") {
+            const fastRaceMs = Math.min(
+              cfg.injection.fastRaceMs,
+              stageBudgetMs(memoryDeadline, stageBudgets.fetch),
+            );
+            const fastResult = await withPromptMemoryDeadline(
+              bundlePromise,
+              null as unknown as ReadBundle,
+              fastRaceMs,
+            );
+            if (!fastResult.timedOut) {
+              // Bundle resolved within the fast window — use it.
+              metrics.inc("recall.fast_race.hit");
+              bundle = fastResult.value;
+            } else {
+              // Bundle not ready yet — fall back to cheap mode for this prompt.
+              // The bundle promise keeps running and writes to LRU caches.
+              metrics.inc("recall.fast_race.miss");
+              usedFastRace = true;
+              // Keep a reference so the promise is not GC'd before it resolves.
+              bundlePromise.catch(() => {
+                // errors already handled by the precompute catch above
+              });
+              bundle = emptyRecallBundle();
+            }
 
-          if (identityCompacted) {
-            lines.push("## Identity (remempalace)", "", identityCompacted, "");
+            // Emit recall.full.timeout if the overall prompt-path deadline is
+            // exhausted (covers edge cases where init consumed nearly all of
+            // memoryDeadline before the fast race ran).
+            if (memoryDeadline.remainingMs() <= 0) {
+              metrics.inc("recall.full.timeout");
+              await debugLog("before_prompt_build:recall-timeout", {
+                sessionKey,
+                recallMode,
+                deadlineMs: PROMPT_RECALL_DEADLINE_MS,
+                usedPrecomputed: canUsePrecomputed,
+                fastRaceMiss: usedFastRace,
+              });
+            }
+          } else if (recallMode === "cheap+kg1") {
+            const cheapKgResult = await withPromptMemoryDeadline(
+              bundlePromise,
+              emptyRecallBundle(),
+              Math.min(
+                cfg.injection.fastRaceMs,
+                stageBudgetMs(memoryDeadline, stageBudgets.fetch),
+              ),
+            );
+            if (cheapKgResult.timedOut) {
+              metrics.inc("recall.cheap_kg1.timeout");
+              usedCheapKgFallback = true;
+            }
+            bundle = cheapKgResult.value;
+          } else {
+            bundle = await bundlePromise;
           }
 
-          if (injected.length > 0) {
-            lines.push("## Memory Context (remempalace)", "", ...injected, "");
+          if (canUsePrecomputed) {
+            metrics.inc("recall.precompute.used");
+            if (precomputed.prompt !== prompt) {
+              metrics.inc("recall.precompute.intent_used");
+            }
+            precomputedRecallBySession.delete(sessionKey);
           }
+          const fetchLatencyMs = Math.max(0, Date.now() - fetchStartedAt);
+          latencyMetrics.recordLatency("before_prompt_build.fetch", fetchLatencyMs);
+          metrics.inc("latency.before_prompt_build.fetch.ms_total", fetchLatencyMs);
+          metrics.inc("latency.before_prompt_build.fetch.count");
+          if (fetchLatencyMs > stageBudgets.fetch) {
+            metrics.inc("latency.before_prompt_build.fetch.overrun");
+            void debugLog("before_prompt_build:fetch-overrun", {
+              sessionKey,
+              fetchLatencyMs,
+              budgetMs: stageBudgets.fetch,
+            });
+            logger.warn(`prompt-path fetch overran sub-budget: ${fetchLatencyMs}ms > ${stageBudgets.fetch}ms`);
+          }
+          const formatStartedAt = Date.now();
+          const formatBudgetMs = stageBudgetMs(memoryDeadline, stageBudgets.format);
+          const kgFacts = normalizeKgResult(bundle.kgResults);
+          const overheadTokens = promptInjectionService.computeOverheadTokens({
+            identityIncluded: identityCompacted.length > 0,
+          });
+          const injected =
+            formatBudgetMs <= 0
+              ? []
+              : recallMode === "cheap" || usedFastRace || usedCheapKgFallback
+              ? recallService.buildCheapMemoryLines({
+                  prompt,
+                  diaryEntries: start?.diaryEntries,
+                  maxDiaryEntries: 2,
+                })
+              : buildTieredInjection({
+                  kgFacts,
+                  searchResults: bundle.searchResults,
+                  budget,
+                  tiers: cfg.tiers,
+                  useAaak: cfg.injection.useAaak,
+                  metrics,
+                  fixedOverheadTokens: overheadTokens,
+                });
+
+          lines = promptInjectionService.buildRecallContext({
+            identity: identityCompacted,
+            memoryLines: injected,
+          });
+          const formatLatencyMs = Math.max(0, Date.now() - formatStartedAt);
+          latencyMetrics.recordLatency("before_prompt_build.format", formatLatencyMs);
+          metrics.inc("latency.before_prompt_build.format.ms_total", formatLatencyMs);
+          metrics.inc("latency.before_prompt_build.format.count");
+          if (formatLatencyMs > stageBudgets.format) {
+            metrics.inc("latency.before_prompt_build.format.overrun");
+            void debugLog("before_prompt_build:format-overrun", {
+              sessionKey,
+              formatLatencyMs,
+              budgetMs: stageBudgets.format,
+            });
+            logger.warn(`prompt-path format overran sub-budget: ${formatLatencyMs}ms > ${stageBudgets.format}ms`);
+          }
+          const totalLatencyMs = Math.max(0, Date.now() - promptStartedAt);
+          latencyMetrics.recordLatency("before_prompt_build.total", totalLatencyMs);
+          metrics.inc("latency.before_prompt_build.total.ms_total", totalLatencyMs);
+          metrics.inc("latency.before_prompt_build.total.count");
+          metrics.setMax("latency.before_prompt_build.total.max_ms", totalLatencyMs);
 
           await debugLog("before_prompt_build:assembled", {
             sessionKey,
@@ -417,7 +949,16 @@ const plugin = {
             finalLineCount: lines.length,
             finalBlock: lines.join("\n"),
           });
-          if (lines.length === 0) return;
+          lastRecall = {
+            sessionKey,
+            promptPreview: prompt.slice(0, 160),
+            candidates,
+            kgFactCount: kgFacts.length,
+            searchResultCount: bundle.searchResults.length,
+            injectedLineCount: injected.length,
+            identityIncluded: identityCompacted.length > 0,
+            at: Date.now(),
+          };
           cachedBySession.set(sessionKey, lines);
 
           // Return the block as prependSystemContext — openclaw's
@@ -437,12 +978,30 @@ const plugin = {
         } catch (err) {
           await debugLog("before_prompt_build:error", { sessionKey, error: (err as Error).message });
           logger.warn(`recall failed: ${(err as Error).message}`);
+          cachedBySession.set(sessionKey, lines);
+          lastRecall = {
+            sessionKey,
+            promptPreview: prompt.slice(0, 160),
+            candidates: [],
+            kgFactCount: 0,
+            searchResultCount: 0,
+            injectedLineCount: 0,
+            identityIncluded: false,
+            at: Date.now(),
+          };
+          return { prependSystemContext: lines.join("\n") };
         }
       });
 
       api.on("gateway_stop", async () => {
         heartbeat.stop();
         if (kgBatcher) await kgBatcher.stop();
+        if (hotCacheInterval !== null) {
+          clearInterval(hotCacheInterval);
+          hotCacheInterval = null;
+        }
+        if (cfg.hotCache.enabled) await flushHotCache();
+        if (cfg.hotCache.enabled) await flushHealthCache();
         await mcp.stop();
       });
     }
@@ -450,22 +1009,27 @@ const plugin = {
     const builder = (params: unknown) => {
       const p = params as { sessionKey?: string };
       const key = p?.sessionKey ?? "default";
+      // If before_prompt_build already fired for this session, the hook return
+      // value (prependSystemContext) is the authoritative injection path.
+      // Returning [] here prevents a duplicate block when a modern OpenClaw
+      // host calls both the hook handler AND the registered memory builder.
+      // Legacy hosts that do not wire api.on events never set hookFiredSessions,
+      // so the builder remains the sole injection path for them.
+      if (hookFiredSessions.has(key)) {
+        void debugLog("builder:skipped-hook-fired", { sessionKey: key });
+        hookFiredSessions.delete(key);
+        cachedBySession.delete(key);
+        return [];
+      }
       const recallLines = cachedBySession.get(key) ?? [];
       cachedBySession.delete(key);
-      const out = !mcp.hasDiaryWrite
-        ? [
-            ...recallLines,
-            "## System Notes (remempalace)",
-            "",
-            "diary: falling back to local JSONL (~/.mempalace/palace/diary/) — mempalace_diary_write returned Internal tool error",
-            "",
-          ]
-        : recallLines;
+      const out = recallLines;
       void debugLog("builder:called", {
         sessionKey: key,
         paramKeys: params && typeof params === "object" ? Object.keys(params) : null,
         recallLineCount: recallLines.length,
-        hasDiaryWrite: mcp.hasDiaryWrite,
+        canWriteDiary: mempalaceRepository.canWriteDiary,
+        diaryPersistenceState: mempalaceRepository.diaryPersistenceState,
         outLineCount: out.length,
         outBlock: out.join("\n"),
       });
@@ -481,31 +1045,50 @@ const plugin = {
     if (typeof api.registerCommand === "function") {
       api.registerCommand({
         name: "remempalace",
-        description: "Show remempalace memory plugin status (MCP, caches, diary fallback)",
+        description: "Show remempalace memory plugin status (health, latency, breakers, diary)",
         acceptsArgs: false,
         handler: async () => {
-          const pending = await diaryReconciler.loadPending().catch(() => []);
-          const diaryStatus = {
-            state: computeDiaryHealth({
-              hasDiaryWrite: mcp.hasDiaryWrite,
-              pending: pending.length,
-              lastReplay: diaryReconciler.lastReplayResult,
-            }),
-            pending: pending.length,
-            lastReplay: diaryReconciler.lastReplayResult,
-          };
-          return {
-            text: buildStatusReport({
-              mcpReady: mcp.isReady(),
-              hasDiaryWrite: mcp.hasDiaryWrite,
-              hasDiaryRead: mcp.hasDiaryRead,
-              hasKgInvalidate: mcp.hasKgInvalidate,
-              searchCache: searchCache.stats(),
-              kgCache: kgCache.stats(),
-              metrics: metrics.snapshot(),
-              diary: diaryStatus,
-            }),
-          };
+          const diaryStatus = await diaryService.getStatus({ reconciler: diaryReconciler });
+          const liveReport = buildStatusReport({
+            mcpReady: mcp.isReady(),
+            canWriteDiary: mempalaceRepository.canWriteDiary,
+            canReadDiary: mempalaceRepository.canReadDiary,
+            canInvalidateKg: mempalaceRepository.canInvalidateKg,
+            canPersistDiary: mempalaceRepository.canPersistDiary,
+            searchCache: searchCache.stats(),
+            kgCache: kgCache.stats(),
+            metrics: metrics.snapshot(),
+            latency: latencyMetrics.snapshot(),
+            breakers: breakers.snapshot(),
+            diary: diaryStatus,
+            lastProbeAt: lastHealthProbeAt,
+            lastProbeReason: lastHealthProbeReason,
+            lastRecall,
+          });
+          // Append cold-start health hint when MCP hasn't init'd yet and a snapshot exists.
+          if (!mcp.isReady() && coldStartHealth) {
+            const h = coldStartHealth.snapshot;
+            const age = Math.round((Date.now() - h.savedAt) / 1000);
+            const staleMark = coldStartHealth.stale ? " [stale]" : "";
+            const hintLines = [
+              "",
+              `cold_start_hint (${age}s ago${staleMark}):`,
+              `  mcp_ready: ${h.mcpReady}`,
+              `  diary_persistence: ${h.diaryPersistenceState}`,
+              `  capabilities: write=${h.capabilities.canWriteDiary} read=${h.capabilities.canReadDiary} kg_invalidate=${h.capabilities.canInvalidateKg} persist=${h.capabilities.canPersistDiary}`,
+            ];
+            if (h.lastProbeAt !== null) {
+              const probeAge = Math.round((Date.now() - h.lastProbeAt) / 1000);
+              hintLines.push(`  last_probe: ${probeAge}s ago — ${h.lastProbeReason ?? "unknown"}`);
+            }
+            if (h.lastReplay) {
+              hintLines.push(
+                `  last_replay: ${h.lastReplay.succeeded}/${h.lastReplay.attempted} succeeded`,
+              );
+            }
+            return { text: liveReport + "\n" + hintLines.join("\n") };
+          }
+          return { text: liveReport };
         },
       });
     }

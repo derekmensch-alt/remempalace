@@ -73,3 +73,66 @@ diary is falling back to local storage.
    required backing store (database, file, etc.) is accessible at the configured path.
 2. Verify the MCP tool schema matches the arguments being sent (`wing`, `room`, `content`, `added_by`).
 3. Check server-side logs for the root Python traceback that maps to "Internal tool error".
+
+---
+
+# OpenClaw TUI freezes on Node.js 24.13.0 when launched with `--history-limit 0`
+
+## Summary
+
+OpenClaw 2026.4.26 on Windows with Node.js 24.13.0 appears to freeze in the TUI when launched
+with `openclaw tui --history-limit 0`. The gateway is alive and `openclaw health` succeeds, but the
+TUI stays stuck at the connecting/idle screen and consumes significant memory/CPU.
+
+Node.js 24.13.0 should be treated as a suspect runtime factor until this is reproduced on an LTS
+Node.js line.
+
+## Reproduction
+
+Start the main gateway, then launch the TUI with a zero history limit:
+
+```powershell
+openclaw gateway --force
+openclaw tui --history-limit 0
+```
+
+Observed gateway log:
+
+```text
+chat.history ... INVALID_REQUEST
+invalid chat.history params: at /limit: must be >= 1
+```
+
+## Environment
+
+- OpenClaw: 2026.4.26 (`be8c246`)
+- OS: Windows 10.0.26200 x64
+- Node.js: 24.13.0 (non-LTS/current line; possible contributing factor)
+- Gateway: local loopback, `ws://127.0.0.1:18789`
+
+## Expected Behavior
+
+Either `--history-limit 0` should be accepted as "load no history", or the CLI should reject it before
+launching the TUI with a clear validation error.
+
+## Actual Behavior
+
+The TUI sends an invalid `chat.history` request with `limit: 0`; the gateway rejects it, and the TUI
+does not surface the error. It appears frozen.
+
+## Workaround
+
+Use a positive history limit:
+
+```powershell
+openclaw tui --history-limit 1
+```
+
+or omit the flag:
+
+```powershell
+openclaw tui
+```
+
+Also test against a supported LTS Node.js runtime to determine whether the freeze is specific to
+Node.js 24.13.0.

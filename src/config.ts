@@ -15,7 +15,7 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
   // should point this at their venv python, e.g.
   // `~/.local/share/pipx/venvs/mempalace/bin/python`.
   mcpPythonBin: "python3",
-  cache: { capacity: 200, ttlMs: 300000, kgTtlMs: 600000 },
+  cache: { capacity: 200, ttlMs: 300000, kgTtlMs: 600000, bundleTtlMs: 180000 },
   injection: {
     maxTokens: 800,
     budgetPercent: 0.15,
@@ -28,6 +28,12 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
     knownEntities: ["OpenClaw", "MemPalace", "remempalace", "Anthropic", "Claude"],
     identityMaxTokens: 150,
     rawIdentity: false,
+    fastRaceMs: 50,
+    budgets: {
+      initMs: 200,
+      fetchMs: 1100,
+      formatMs: 200,
+    },
   },
   tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
   diary: {
@@ -38,10 +44,16 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
   },
   kg: {
     autoLearn: true,
+    learnFromAssistant: false,
     batchSize: 5,
     flushIntervalMs: 30000,
     invalidateOnConflict: false,
     minConfidence: 0.6,
+  },
+  learning: {
+    fromUser: true,
+    fromAssistant: false,
+    fromSystem: false,
   },
   prefetch: { diaryCount: 3, identityEntities: true },
   identity: {
@@ -51,6 +63,22 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
   },
   memoryRuntime: {
     allowedReadRoots: [`${homedir()}/.mempalace`, `${homedir()}/.openclaw/workspace`],
+    // Write safety: default empty — all writeFile calls are rejected unless the
+    // user explicitly enumerates allowed write roots. This is a defence-in-depth
+    // gate at the adapter boundary; MCP diary/KG writes are gated separately by
+    // the repository's canWriteDiary / canInvalidateKg capabilities.
+    allowedWriteRoots: [] as string[],
+  },
+  hotCache: {
+    enabled: true,
+    path: `${homedir()}/.mempalace/remempalace/hot-cache.json`,
+    maxEntries: 50,
+    flushIntervalMs: 60_000,
+  },
+  breaker: {
+    search: { failureThreshold: 3, windowMs: 10_000, cooldownMs: 15_000 },
+    kg: { failureThreshold: 3, windowMs: 10_000, cooldownMs: 15_000 },
+    diary: { failureThreshold: 3, windowMs: 10_000, cooldownMs: 15_000 },
   },
 };
 
@@ -67,16 +95,29 @@ export function mergeConfig(
   };
 
   const userRoots = user.memoryRuntime?.allowedReadRoots;
+  const userWriteRoots = user.memoryRuntime?.allowedWriteRoots;
   const memoryRuntime = {
     allowedReadRoots: userRoots
       ? userRoots.map(expandTilde)
       : DEFAULT_CONFIG.memoryRuntime.allowedReadRoots,
+    allowedWriteRoots: userWriteRoots
+      ? userWriteRoots.map(expandTilde)
+      : DEFAULT_CONFIG.memoryRuntime.allowedWriteRoots,
   };
+
+  const mergedHotCache = { ...DEFAULT_CONFIG.hotCache, ...user.hotCache };
 
   return {
     mcpPythonBin: user.mcpPythonBin ?? DEFAULT_CONFIG.mcpPythonBin,
     cache: { ...DEFAULT_CONFIG.cache, ...user.cache },
-    injection: { ...DEFAULT_CONFIG.injection, ...user.injection },
+    injection: {
+      ...DEFAULT_CONFIG.injection,
+      ...user.injection,
+      budgets: {
+        ...DEFAULT_CONFIG.injection.budgets,
+        ...user.injection?.budgets,
+      },
+    },
     tiers: { ...DEFAULT_CONFIG.tiers, ...user.tiers },
     diary: {
       ...DEFAULT_CONFIG.diary,
@@ -84,8 +125,20 @@ export function mergeConfig(
       localDir: expandTilde(user.diary?.localDir ?? DEFAULT_CONFIG.diary.localDir),
     },
     kg: { ...DEFAULT_CONFIG.kg, ...user.kg },
+    learning: { ...DEFAULT_CONFIG.learning, ...user.learning },
     prefetch: { ...DEFAULT_CONFIG.prefetch, ...user.prefetch },
     identity,
     memoryRuntime,
+    hotCache: {
+      enabled: mergedHotCache.enabled,
+      path: expandTilde(mergedHotCache.path),
+      maxEntries: mergedHotCache.maxEntries,
+      flushIntervalMs: mergedHotCache.flushIntervalMs,
+    },
+    breaker: {
+      search: { ...DEFAULT_CONFIG.breaker.search, ...user.breaker?.search },
+      kg: { ...DEFAULT_CONFIG.breaker.kg, ...user.breaker?.kg },
+      diary: { ...DEFAULT_CONFIG.breaker.diary, ...user.breaker?.diary },
+    },
   };
 }

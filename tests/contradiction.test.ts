@@ -19,8 +19,12 @@ describe("classifyPredicate", () => {
     expect(classifyPredicate("primary_email")).toBe("single");
   });
 
-  it("treats 'is_a' as single-cardinality (one role at a time)", () => {
-    expect(classifyPredicate("is_a")).toBe("single");
+  it("treats 'is_a' as list-cardinality because identities and roles can be simultaneous", () => {
+    expect(classifyPredicate("is_a")).toBe("list");
+  });
+
+  it("treats 'decided_to' as list-cardinality because decisions are not mutually exclusive", () => {
+    expect(classifyPredicate("decided_to")).toBe("list");
   });
 
   it("treats 'works_at' as single-cardinality (typical case)", () => {
@@ -77,14 +81,28 @@ describe("detectContradictions", () => {
   it("returns multiple contradictions when multiple priors disagree", () => {
     const prior: KgFact[] = [
       { subject: "Derek", predicate: "favorite_model", object: "Kimi" },
-      { subject: "Derek", predicate: "is_a", object: "engineer" },
+      { subject: "Derek", predicate: "default_browser", object: "Firefox" },
     ];
     const next = [
       ef("Derek", "favorite_model", "Claude"),
-      ef("Derek", "is_a", "manager"),
+      ef("Derek", "default_browser", "Chrome"),
     ];
     const c = detectContradictions(prior, next);
     expect(c).toHaveLength(2);
+  });
+
+  it("does NOT contradict multiple valid roles for is_a", () => {
+    const prior: KgFact[] = [{ subject: "Derek", predicate: "is_a", object: "engineer" }];
+    const next = [ef("Derek", "is_a", "founder")];
+    expect(detectContradictions(prior, next)).toEqual([]);
+  });
+
+  it("does NOT contradict multiple project decisions for decided_to", () => {
+    const prior: KgFact[] = [
+      { subject: "we", predicate: "decided_to", object: "use TypeScript" },
+    ];
+    const next = [ef("we", "decided_to", "delay launch")];
+    expect(detectContradictions(prior, next)).toEqual([]);
   });
 
   it("treats prior with multiple objects on single-card predicate (legacy data) as all contradictory", () => {

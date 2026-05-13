@@ -2,6 +2,15 @@ import { describe, it, expect, vi } from "vitest";
 import { extractFacts, KgBatcher } from "../src/kg.js";
 import { Metrics } from "../src/metrics.js";
 
+function makeRepository() {
+  return {
+    canInvalidateKg: true,
+    queryKgEntity: vi.fn().mockResolvedValue({}),
+    addKgFact: vi.fn().mockResolvedValue({}),
+    invalidateKgFact: vi.fn().mockResolvedValue({}),
+  };
+}
+
 describe("extractFacts", () => {
   it("extracts SUBJ is PRED OBJ patterns", () => {
     const text = "Derek's favorite model is Kimi K2.5.";
@@ -38,40 +47,40 @@ describe("extractFacts", () => {
 
 describe("KgBatcher", () => {
   it("flushes when batch size is reached", async () => {
-    const mockMcp = { callTool: vi.fn().mockResolvedValue({}) };
-    const batcher = new KgBatcher(mockMcp as any, { batchSize: 2, flushIntervalMs: 10000 });
+    const mockRepository = makeRepository();
+    const batcher = new KgBatcher(mockRepository as any, { batchSize: 2, flushIntervalMs: 10000 });
     batcher.add({ subject: "A", predicate: "p", object: "1" });
-    expect(mockMcp.callTool).not.toHaveBeenCalled();
+    expect(mockRepository.addKgFact).not.toHaveBeenCalled();
     batcher.add({ subject: "B", predicate: "p", object: "2" });
     await new Promise((r) => setTimeout(r, 5));
-    expect(mockMcp.callTool).toHaveBeenCalledTimes(2);
+    expect(mockRepository.addKgFact).toHaveBeenCalledTimes(2);
     await batcher.stop();
   });
 
   it("flushes on timer if batch not full", async () => {
-    const mockMcp = { callTool: vi.fn().mockResolvedValue({}) };
-    const batcher = new KgBatcher(mockMcp as any, { batchSize: 10, flushIntervalMs: 20 });
+    const mockRepository = makeRepository();
+    const batcher = new KgBatcher(mockRepository as any, { batchSize: 10, flushIntervalMs: 20 });
     batcher.add({ subject: "A", predicate: "p", object: "1" });
     await new Promise((r) => setTimeout(r, 40));
-    expect(mockMcp.callTool).toHaveBeenCalled();
+    expect(mockRepository.addKgFact).toHaveBeenCalled();
     await batcher.stop();
   });
 
   it("coalesces duplicates in the same batch", async () => {
-    const mockMcp = { callTool: vi.fn().mockResolvedValue({}) };
-    const batcher = new KgBatcher(mockMcp as any, { batchSize: 3, flushIntervalMs: 10000 });
+    const mockRepository = makeRepository();
+    const batcher = new KgBatcher(mockRepository as any, { batchSize: 3, flushIntervalMs: 10000 });
     batcher.add({ subject: "A", predicate: "p", object: "1" });
     batcher.add({ subject: "A", predicate: "p", object: "1" });
     batcher.add({ subject: "A", predicate: "p", object: "1" });
     await new Promise((r) => setTimeout(r, 5));
-    expect(mockMcp.callTool).toHaveBeenCalledTimes(1);
+    expect(mockRepository.addKgFact).toHaveBeenCalledTimes(1);
     await batcher.stop();
   });
 
   it("records kg.facts.batched on add and kg.facts.flushed on flush", async () => {
     const metrics = new Metrics();
-    const mockMcp = { callTool: vi.fn().mockResolvedValue({}) };
-    const batcher = new KgBatcher(mockMcp as any, {
+    const mockRepository = makeRepository();
+    const batcher = new KgBatcher(mockRepository as any, {
       batchSize: 2,
       flushIntervalMs: 10000,
       metrics,
@@ -87,8 +96,8 @@ describe("KgBatcher", () => {
 
   it("does not increment kg.facts.batched when stopped", async () => {
     const metrics = new Metrics();
-    const mockMcp = { callTool: vi.fn().mockResolvedValue({}) };
-    const batcher = new KgBatcher(mockMcp as any, {
+    const mockRepository = makeRepository();
+    const batcher = new KgBatcher(mockRepository as any, {
       batchSize: 5,
       flushIntervalMs: 10000,
       metrics,
@@ -96,5 +105,23 @@ describe("KgBatcher", () => {
     await batcher.stop();
     batcher.add({ subject: "A", predicate: "p", object: "1" });
     expect(metrics.snapshot()["kg.facts.batched"]).toBeUndefined();
+  });
+
+  it("passes source_closet provenance through to addKgFact", async () => {
+    const mockRepository = makeRepository();
+    const batcher = new KgBatcher(mockRepository as any, { batchSize: 1, flushIntervalMs: 10000 });
+
+    batcher.add({
+      subject: "Derek",
+      predicate: "uses",
+      object: "OpenClaw",
+      source_closet: "openclaw:user",
+    });
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(mockRepository.addKgFact).toHaveBeenCalledWith(
+      expect.objectContaining({ source_closet: "openclaw:user" }),
+    );
+    await batcher.stop();
   });
 });

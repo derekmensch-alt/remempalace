@@ -1,4 +1,4 @@
-import type { McpClient } from "./mcp-client.js";
+import type { MemPalaceRepository } from "./ports/mempalace-repository.js";
 import type { PalaceStatus } from "./types.js";
 
 export interface PrefetchResult {
@@ -8,10 +8,13 @@ export interface PrefetchResult {
 
 export interface PrefetchOptions {
   diaryCount: number;
+  diaryReadTimeoutMs?: number;
 }
 
+const DEFAULT_DIARY_READ_TIMEOUT_MS = 500;
+
 export async function prefetchWakeUp(
-  mcp: McpClient,
+  repository: Pick<MemPalaceRepository, "getPalaceStatus" | "readDiary" | "searchMemory">,
   opts: PrefetchOptions,
 ): Promise<PrefetchResult> {
   const safe = async <T>(p: Promise<T>, fallback: T): Promise<T> => {
@@ -22,17 +25,24 @@ export async function prefetchWakeUp(
     }
   };
   const [statusResult, diaryResult, _warmupResult] = await Promise.all([
-    safe(mcp.callTool<PalaceStatus>("mempalace_status", {}), null),
+    safe(repository.getPalaceStatus(), null),
     safe(
-      mcp.callTool<unknown[]>("mempalace_diary_read", {
-        agent_name: "remempalace",
-        last_n: opts.diaryCount,
+      repository.readDiary<unknown>({
+        agentName: "remempalace",
+        lastN: opts.diaryCount,
+        timeoutMs: opts.diaryReadTimeoutMs ?? DEFAULT_DIARY_READ_TIMEOUT_MS,
       }),
       [],
     ),
-    safe(mcp.callTool("mempalace_search", { query: "__warmup__", limit: 1 }), null),
+    safe(repository.searchMemory({ query: "__warmup__", limit: 1 }), null),
   ]);
   const status = statusResult;
-  const diaryEntries = diaryResult;
-  return { status, diaryEntries: Array.isArray(diaryEntries) ? diaryEntries : [] };
+  return { status, diaryEntries: normalizeDiaryEntries(diaryResult) };
+}
+
+function normalizeDiaryEntries(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  if (!raw || typeof raw !== "object") return [];
+  const entries = (raw as { entries?: unknown }).entries;
+  return Array.isArray(entries) ? entries : [];
 }

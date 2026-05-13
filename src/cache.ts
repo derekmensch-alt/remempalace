@@ -45,6 +45,10 @@ export class MemoryCache<V> {
     this.lru.delete(key);
   }
 
+  has(key: string): boolean {
+    return this.lru.has(key);
+  }
+
   clear(): void {
     this.lru.clear();
     this.hitCount = 0;
@@ -57,6 +61,32 @@ export class MemoryCache<V> {
       misses: this.missCount,
       size: this.lru.size,
     };
+  }
+
+  /**
+   * Returns all live entries as [key, value, expiresAt] triples.
+   * expiresAt is derived from getRemainingTTL so fake-timer behaviour is correct.
+   * Expired entries are excluded.
+   */
+  entries(): Array<[string, V, number]> {
+    const result: Array<[string, V, number]> = [];
+    for (const [key, value] of this.lru.entries()) {
+      const remaining = this.lru.getRemainingTTL(key);
+      if (remaining <= 0) continue; // expired or no TTL — skip
+      const expiresAt = Date.now() + remaining;
+      result.push([key, value as V, expiresAt]);
+    }
+    return result;
+  }
+
+  /**
+   * Insert key/value with a specific absolute expiry epoch ms.
+   * Silently drops entries that are already expired.
+   */
+  setWithExpiry(key: string, value: V, expiresAt: number): void {
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) return; // already expired — drop silently
+    this.lru.set(key, value, { ttl: remaining });
   }
 }
 

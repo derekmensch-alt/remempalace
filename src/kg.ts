@@ -1,8 +1,8 @@
-import type { McpClient } from "./mcp-client.js";
 import { dedupeWithKey } from "./dedup.js";
 import type { KgFact } from "./types.js";
 import type { Metrics } from "./metrics.js";
 import { classifyPredicate } from "./contradiction.js";
+import type { MemPalaceRepository } from "./ports/mempalace-repository.js";
 
 function normalizeKgFacts(raw: unknown): KgFact[] {
   if (!raw || typeof raw !== "object") return [];
@@ -22,6 +22,7 @@ const USES_PATTERN =
 const APOSTROPHE_IS_PATTERN =
   /\b([A-Z][\w]{1,32})'s?\s+(favorite|preferred|chosen|default)\s+(\w+)\s+is\s+([A-Za-z][\w\s.\-/+]{1,60})(?:\.|$|\n)/g;
 
+/** @deprecated Use extractStructuredFacts from structured-extractor.ts instead. */
 export function extractFacts(text: string): KgFact[] {
   const out: KgFact[] = [];
 
@@ -50,8 +51,8 @@ export interface KgBatcherOptions {
   batchSize: number;
   flushIntervalMs: number;
   invalidateOnConflict?: boolean;
-  getMcpCaps?: () => { hasKgInvalidate: boolean };
   metrics?: Metrics;
+  onFactsWritten?: (facts: KgFact[]) => void;
 }
 
 export class KgBatcher {
@@ -60,7 +61,10 @@ export class KgBatcher {
   private stopped = false;
 
   constructor(
-    private readonly mcp: McpClient,
+    private readonly repository: Pick<
+      MemPalaceRepository,
+      "canInvalidateKg" | "queryKgEntity" | "addKgFact" | "invalidateKgFact"
+    >,
     private readonly opts: KgBatcherOptions,
   ) {
     this.startTimer();
@@ -83,12 +87,12 @@ export class KgBatcher {
     );
     const shouldInvalidate =
       this.opts.invalidateOnConflict === true &&
-      this.opts.getMcpCaps?.().hasKgInvalidate === true;
+      this.repository.canInvalidateKg;
 
     for (const f of batch) {
       if (shouldInvalidate && classifyPredicate(f.predicate) === "single") {
         try {
-          const raw = await this.mcp.callTool<unknown>("mempalace_kg_query", { entity: f.subject });
+          const raw = await this.repository.queryKgEntity({ entity: f.subject });
           const existing = normalizeKgFacts(raw);
           const conflicts = existing.filter(
             (e) => e.predicate === f.predicate && e.object !== f.object && e.current !== false,
@@ -100,8 +104,8 @@ export class KgBatcher {
             conflicts.map((e) => {
               this.opts.metrics?.inc("kg.invalidate.calls");
               this.opts.metrics?.inc("kg.contradictions.invalidated");
-              return this.mcp
-                .callTool("mempalace_kg_invalidate", {
+              return this.repository
+                .invalidateKgFact({
                   subject: e.subject,
                   predicate: e.predicate,
                   object: e.object,
@@ -113,16 +117,12 @@ export class KgBatcher {
           // best effort
         }
       }
-      await this.mcp
-        .callTool("mempalace_kg_add", {
-          subject: f.subject,
-          predicate: f.predicate,
-          object: f.object,
-          valid_from: f.valid_from,
-        })
+      await this.repository
+        .addKgFact(f)
         .then(() => this.opts.metrics?.inc("kg.facts.flushed"))
         .catch(() => this.opts.metrics?.inc("kg.facts.flush_failed"));
     }
+    if (batch.length > 0) this.opts.onFactsWritten?.(batch);
   }
 
   private startTimer(): void {

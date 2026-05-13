@@ -1,13 +1,26 @@
-import type { McpClient } from "./mcp-client.js";
+import type { MemPalaceRepository } from "./ports/mempalace-repository.js";
+import { WriteRejected } from "./ports/mempalace-repository.js";
 import type { SearchResult } from "./types.js";
 
 const MAX_READ_BYTES = 10 * 1024 * 1024;
 
+/** Lifecycle-only surface of McpClient consumed by the memory runtime.
+ *  No callTool usage here — raw MCP tool calls remain isolated in the adapter. */
+export interface McpLifecycle {
+  isReady(): boolean;
+  stop?: () => Promise<void>;
+}
+
 export interface MempalaceMemoryRuntimeOptions {
-  mcp: McpClient;
+  mcp: McpLifecycle;
+  /** Full repository port — search, capabilities, and future write ops all go through this. */
+  repository: MemPalaceRepository;
   similarityThreshold: number;
   callTimeoutMs?: number;
   allowedReadRoots?: string[];
+  /** Paths the runtime may write to via writeFile. Empty (default) rejects all writes. */
+  allowedWriteRoots?: string[];
+  waitUntilReady?: () => Promise<unknown>;
 }
 
 interface BackendConfig {
@@ -28,6 +41,21 @@ interface ProviderStatus {
   backend: "builtin";
   provider: string;
   model?: string;
+  files?: number;
+  chunks?: number;
+  dirty?: boolean;
+  sources?: Array<"memory" | "sessions">;
+  cache?: {
+    enabled: boolean;
+  };
+  fts?: {
+    enabled: boolean;
+    available: boolean;
+  };
+  vector?: {
+    enabled: boolean;
+    available?: boolean;
+  };
 }
 
 interface EmbeddingProbe {
@@ -43,17 +71,29 @@ interface ReadResult {
   lines?: number;
 }
 
+interface WriteResult {
+  ok: boolean;
+  error?: string;
+}
+
 export interface MempalaceSearchManager {
   search(
     query: string,
     opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
   ): Promise<HostSearchResult[]>;
   readFile(params: { relPath: string; from?: number; lines?: number }): Promise<ReadResult>;
+  /** Write text content to a file. The path must be inside an allowed write root;
+   *  otherwise returns { ok: false, error: "WriteRejected: ..." }. */
+  writeFile(params: { relPath: string; content: string }): Promise<WriteResult>;
   status(): ProviderStatus;
   probeEmbeddingAvailability(): Promise<EmbeddingProbe>;
   probeVectorAvailability(): Promise<boolean>;
   close?(): Promise<void>;
 }
+
+type ManagedMcpLifecycle = McpLifecycle & {
+  stop?: () => Promise<void>;
+};
 
 function mapMempalaceResult(r: SearchResult): HostSearchResult {
   const lineCount = Math.max(1, (r.text ?? "").split("\n").length);
@@ -72,7 +112,9 @@ export class MempalaceMemoryRuntime {
   private readonly timeoutMs: number;
   // Cache the build PROMISE, not the resolved value, so concurrent callers
   // share a single in-flight build instead of racing to produce two managers.
-  private managerPromise: Promise<MempalaceSearchManager> | null = null;
+  private defaultManagerPromise: Promise<MempalaceSearchManager> | null = null;
+  private statusManagerPromise: Promise<MempalaceSearchManager> | null = null;
+  private defaultManagerRequested = false;
 
   constructor(private readonly opts: MempalaceMemoryRuntimeOptions) {
     this.timeoutMs = opts.callTimeoutMs ?? 8000;
@@ -82,37 +124,52 @@ export class MempalaceMemoryRuntime {
     return { backend: "builtin" };
   }
 
-  async getMemorySearchManager(_params: {
+  async getMemorySearchManager(params: {
     cfg: unknown;
     agentId: string;
     purpose?: "default" | "status";
   }): Promise<{ manager: MempalaceSearchManager | null; error?: string }> {
+    await this.opts.waitUntilReady?.();
     if (!this.opts.mcp.isReady()) {
       return { manager: null, error: "mempalace MCP client is not ready" };
     }
-    if (!this.managerPromise) {
+    const purpose = params.purpose === "status" ? "status" : "default";
+    if (purpose === "default") this.defaultManagerRequested = true;
+    const currentPromise =
+      purpose === "status" ? this.statusManagerPromise : this.defaultManagerPromise;
+    if (!currentPromise) {
       // Clear the cache on build failure so the next caller retries instead of
       // re-awaiting a permanently-rejected promise.
       let wrapped: Promise<MempalaceSearchManager>;
-      wrapped = this.buildManagerAsync().catch((err) => {
-        if (this.managerPromise === wrapped) {
-          this.managerPromise = null;
+      wrapped = this.buildManagerAsync(purpose).catch((err) => {
+        if (purpose === "status" && this.statusManagerPromise === wrapped) {
+          this.statusManagerPromise = null;
+        }
+        if (purpose === "default" && this.defaultManagerPromise === wrapped) {
+          this.defaultManagerPromise = null;
         }
         throw err;
       });
-      this.managerPromise = wrapped;
+      if (purpose === "status") {
+        this.statusManagerPromise = wrapped;
+      } else {
+        this.defaultManagerPromise = wrapped;
+      }
     }
-    const manager = await this.managerPromise;
+    const manager = await (purpose === "status"
+      ? this.statusManagerPromise
+      : this.defaultManagerPromise);
     return { manager };
   }
 
   async closeAllMemorySearchManagers(): Promise<void> {
-    this.managerPromise = null;
+    this.defaultManagerPromise = null;
+    this.statusManagerPromise = null;
+    await (this.opts.mcp as ManagedMcpLifecycle).stop?.();
   }
 
-  private async buildManagerAsync(): Promise<MempalaceSearchManager> {
-    const { mcp, similarityThreshold, allowedReadRoots } = this.opts;
-    const timeoutMs = this.timeoutMs;
+  private async buildManagerAsync(purpose?: "default" | "status"): Promise<MempalaceSearchManager> {
+    const { mcp, repository, similarityThreshold, allowedReadRoots, allowedWriteRoots } = this.opts;
 
     // Resolve each allowed root to its real path (resolving symlinks) once at setup time.
     // If a root doesn't exist yet, keep the normalised absolute path.
@@ -121,6 +178,13 @@ export class MempalaceMemoryRuntime {
 
     const resolvedAllowedRoots: string[] = await Promise.all(
       (allowedReadRoots ?? []).map(async (root) => {
+        const abs = nodePath.resolve(root);
+        return fsPromises.realpath(abs).catch(() => abs);
+      }),
+    );
+
+    const resolvedAllowedWriteRoots: string[] = await Promise.all(
+      (allowedWriteRoots ?? []).map(async (root) => {
         const abs = nodePath.resolve(root);
         return fsPromises.realpath(abs).catch(() => abs);
       }),
@@ -135,13 +199,9 @@ export class MempalaceMemoryRuntime {
     return {
       async search(query, opts) {
         const limit = opts?.maxResults ?? 5;
-        const raw = await mcp.callTool<{ results?: SearchResult[] }>(
-          "mempalace_search",
-          { query, limit },
-          timeoutMs,
-        );
+        const results = await repository.searchMemory({ query, limit });
         const threshold = opts?.minScore ?? similarityThreshold;
-        return (raw.results ?? [])
+        return results
           .filter((r) => r.similarity >= threshold)
           .map(mapMempalaceResult);
       },
@@ -227,11 +287,65 @@ export class MempalaceMemoryRuntime {
         }
       },
 
+      async writeFile(params) {
+        const { promises: fs } = await import("node:fs");
+        const path = await import("node:path");
+
+        const abs = path.resolve(params.relPath);
+
+        // Resolve symlinks for the target directory (file may not exist yet).
+        // Use the parent directory for symlink resolution so new files are
+        // accepted without requiring the target to pre-exist.
+        const parentDir = path.dirname(abs);
+        let realParent: string;
+        try {
+          realParent = await fs.realpath(parentDir);
+        } catch {
+          const err = new WriteRejected(params.relPath);
+          return { ok: false, error: err.message };
+        }
+        const realTarget = path.join(realParent, path.basename(abs));
+
+        // Allowlist check — same prefix-confusion guard as readFile.
+        const allowed = resolvedAllowedWriteRoots.some(
+          (root) => realTarget === root || realTarget.startsWith(root + path.sep),
+        );
+
+        if (!allowed) {
+          const err = new WriteRejected(params.relPath);
+          return { ok: false, error: err.message };
+        }
+
+        try {
+          await fs.writeFile(realTarget, params.content, "utf8");
+          return { ok: true };
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code ?? "UNKNOWN";
+          return { ok: false, error: `cannot write file: ${code}` };
+        }
+      },
+
       status() {
-        return { backend: "builtin", provider: "mempalace" };
+        return {
+          backend: "builtin",
+          provider: "mempalace",
+          files: 0,
+          chunks: 0,
+          dirty: false,
+          sources: ["memory"],
+          cache: { enabled: true },
+          fts: { enabled: false, available: false },
+          // Availability is gated on MCP lifecycle readiness (not a repository
+          // capability — canReadDiary/canWriteDiary reflect tool presence, not
+          // whether the search index is ready for queries).
+          vector: { enabled: true, available: mcp.isReady() },
+        };
       },
 
       async probeEmbeddingAvailability() {
+        // Uses MCP lifecycle readiness. Repository search capability (canReadDiary)
+        // reflects diary tool presence; vector search availability is a function of
+        // whether the subprocess is alive and initialized.
         if (!mcp.isReady()) {
           return { ok: false, error: "mempalace MCP subprocess not ready" };
         }
@@ -241,6 +355,16 @@ export class MempalaceMemoryRuntime {
       async probeVectorAvailability() {
         return true;
       },
+
+      close:
+        purpose === "status"
+          ? async () => {
+              this.statusManagerPromise = null;
+              if (!this.defaultManagerRequested) {
+                await (mcp as ManagedMcpLifecycle).stop?.();
+              }
+            }
+          : undefined,
     };
   }
 }

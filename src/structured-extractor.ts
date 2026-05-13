@@ -1,15 +1,126 @@
 import { dedupeWithKey } from "./dedup.js";
 import type { ExtractedFact, FactCategory } from "./types.js";
 
+// ---------------------------------------------------------------------------
+// False-positive guard: patterns that indicate the surrounding text is NOT a
+// genuine user assertion and should be stripped before rule matching.
+// ---------------------------------------------------------------------------
+
+/** Matches text inside double quotes, single quotes, or backtick blocks. */
+const QUOTED_SPAN_RE = /"[^"]*"|'[^']*'|`[^`]*`/g;
+
+/** Phrases that signal sarcasm / explicit negation of the stated claim. */
+const SARCASM_PHRASES = [
+  "obviously not",
+  "as if",
+  "yeah right",
+  "not really",
+  "i don't think",
+  "that's not true",
+];
+
+/** Phrases that signal a hypothetical scenario. */
+const HYPOTHETICAL_PHRASES = [
+  "if i ",
+  "what if ",
+  "imagine ",
+  "suppose ",
+  "hypothetically",
+];
+
+/** Phrases that signal the user is correcting the assistant, not asserting a fact. */
+const CORRECTION_PHRASES = [
+  "no, that's wrong",
+  "no that's wrong",
+  "actually,",
+  "you're mistaken",
+  "youre mistaken",
+];
+
+/**
+ * Returns true if the text should be suppressed from fact extraction because
+ * it appears to be quoted/code, sarcastic, hypothetical, or a correction.
+ */
+function isFalsePositiveContext(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (SARCASM_PHRASES.some((p) => lower.includes(p))) return true;
+  if (HYPOTHETICAL_PHRASES.some((p) => lower.includes(p))) return true;
+  if (CORRECTION_PHRASES.some((p) => lower.includes(p))) return true;
+  return false;
+}
+
+/**
+ * Strips quoted/code spans from text so rule patterns cannot match inside
+ * them, then checks the remainder for false-positive context markers.
+ */
+function preprocessForExtraction(text: string): string | null {
+  if (isFalsePositiveContext(text)) return null;
+  // Remove quoted/backtick spans to prevent matching inside them.
+  return text.replace(QUOTED_SPAN_RE, " ");
+}
+
+// ---------------------------------------------------------------------------
+// Explicit memory commands
+// ---------------------------------------------------------------------------
+
+export interface MemoryCommands {
+  remember: string[];
+  forget: string[];
+}
+
+// Sentence-end: a dot followed by whitespace or end of string, or end of string directly.
+const SENTENCE_END = "(?=\\.(?:\\s|$)|$)";
+
+const REMEMBER_RE = new RegExp(
+  `(?:please\\s+)?remember\\s+(?:that\\s+)?(.+?)${SENTENCE_END}` +
+    `|(?:make\\s+a\\s+note\\s+(?:that\\s+)?)(.+?)${SENTENCE_END}`,
+  "gi",
+);
+
+const FORGET_RE = new RegExp(
+  `(?:forget\\s+(?:that\\s+)?|don't\\s+remember\\s+|do\\s+not\\s+remember\\s+)(.+?)${SENTENCE_END}` +
+    `|(?:don't\\s+store\\s+this[:\\s]+|do\\s+not\\s+store\\s+this[:\\s]+)(.+?)${SENTENCE_END}` +
+    `|(?:ignore\\s+that|disregard\\s+that)(?:\\s*[:\\-]\\s*(.+?))?${SENTENCE_END}`,
+  "gi",
+);
+
+/**
+ * Detects explicit user memory commands in free text.
+ *
+ * @returns `{ remember, forget }` — each an array of extracted payload strings.
+ */
+export function extractMemoryCommands(text: string): MemoryCommands {
+  const remember: string[] = [];
+  const forget: string[] = [];
+
+  for (const m of text.matchAll(REMEMBER_RE)) {
+    const payload = (m[1] ?? m[2] ?? "").trim();
+    if (payload) remember.push(payload);
+  }
+
+  for (const m of text.matchAll(FORGET_RE)) {
+    const payload = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+    if (payload) forget.push(payload);
+    else if (!m[1] && !m[2] && !m[3]) {
+      // bare "ignore that" / "disregard that" with no trailing content
+      forget.push(text.trim());
+    }
+  }
+
+  return { remember, forget };
+}
+
 interface RulePack {
   category: FactCategory;
   pattern: RegExp;
   base: number;
-  build: (m: RegExpMatchArray) => {
-    subject: string;
-    predicate: string;
-    object: string;
-  } | null;
+  build: (m: RegExpMatchArray) => BuiltFact | BuiltFact[] | null;
+}
+
+interface BuiltFact {
+  subject: string;
+  predicate: string;
+  object: string;
 }
 
 const HEDGE_WORDS = [
@@ -29,8 +140,28 @@ const HEDGE_WORDS = [
 ];
 
 const NEGATION_PATTERNS = [
-  /\b(?:does not|doesn't|do not|don't|did not|didn't|never|no longer|isn't|is not|aren't|are not|wasn't|was not|won't|will not)\b/i,
+  /\b(?:not|doesn't|don't|didn't|never|no longer|isn't|aren't|wasn't|won't)\b/i,
+  /\b(?:does|do|did|is|are|was|will)\s+not\b/i,
 ];
+
+const STABLE_PREDICATES = new Set([
+  "chose_over",
+  "decided_to",
+  "is_a",
+  "likes",
+  "lives_at",
+  "loves",
+  "owns",
+  "prefers",
+  "runs",
+  "runs_on",
+  "shipped",
+  "used_for",
+  "uses",
+  "works_at",
+]);
+
+const STABLE_PREFIXES = ["chosen_", "default_", "favorite_", "preferred_", "primary_"];
 
 function clamp01(n: number): number {
   if (Number.isNaN(n)) return 0;
@@ -45,6 +176,65 @@ function detectHedgeAndNegation(span: string): { hedge: number; negated: boolean
   }
   const negated = NEGATION_PATTERNS.some((re) => re.test(lower));
   return { hedge, negated };
+}
+
+function splitConjunctionList(value: string): string[] {
+  return value
+    .split(/\s+(?:and|&)\s+/i)
+    .map((part) => part.trim().replace(/[.,;:]+$/g, ""))
+    .filter(Boolean);
+}
+
+function normalizePredicate(predicate: string): string | null {
+  const normalized = predicate
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
+  if (STABLE_PREDICATES.has(normalized)) return normalized;
+  if (STABLE_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return normalized;
+  return null;
+}
+
+function normalizeBuiltFacts(built: BuiltFact | BuiltFact[] | null): BuiltFact[] {
+  if (!built) return [];
+  const facts = Array.isArray(built) ? built : [built];
+  return facts.flatMap((fact) => {
+    const predicate = normalizePredicate(fact.predicate);
+    if (!predicate) return [];
+    const subject = fact.subject.trim();
+    const object = fact.object.trim();
+    if (!subject || !object) return [];
+    return [{ ...fact, subject, predicate, object }];
+  });
+}
+
+function buildConjoinedFacts(
+  subject: string,
+  predicate: string,
+  objectText: string,
+): BuiltFact[] {
+  return splitConjunctionList(objectText).map((object) => ({
+    subject,
+    predicate,
+    object,
+  }));
+}
+
+function buildUsingFacts(subject: string, objectText: string): BuiltFact[] {
+  const facts: BuiltFact[] = [];
+  for (const rawPart of splitConjunctionList(objectText)) {
+    const purposeMatch = rawPart.match(/^(.+?)\s+for\s+(.+)$/i);
+    if (!purposeMatch) {
+      facts.push({ subject, predicate: "uses", object: rawPart });
+      continue;
+    }
+    const tool = purposeMatch[1].trim();
+    const purpose = purposeMatch[2].trim();
+    facts.push({ subject, predicate: "uses", object: tool });
+    facts.push({ subject, predicate: "used_for", object: `${tool} for ${purpose}` });
+  }
+  return facts;
 }
 
 const RULES: RulePack[] = [
@@ -63,12 +253,9 @@ const RULES: RulePack[] = [
   {
     category: "preference",
     base: 0.78,
-    pattern: /\b([A-Z][\w]{1,32})\s+(prefers|likes|loves)\s+([A-Za-z][\w.\-/+]{0,59})\b/g,
-    build: (m) => ({
-      subject: m[1].trim(),
-      predicate: m[2].toLowerCase(),
-      object: m[3].trim(),
-    }),
+    pattern:
+      /\b([A-Z][\w]{1,32})\s+(prefers|likes|loves)\s+([A-Za-z][\w\s.\-/+]{0,59}?)(?=[.\n]|$)/g,
+    build: (m) => buildConjoinedFacts(m[1].trim(), m[2].toLowerCase(), m[3]),
   },
 
   // ---- identity ----
@@ -77,22 +264,14 @@ const RULES: RulePack[] = [
     base: 0.85,
     pattern:
       /\b([A-Z][\w]{1,32})\s+is\s+a(?:n)?\s+([A-Za-z][\w\s.\-/+]{1,60}?)(?=[.\n]|$)/g,
-    build: (m) => ({
-      subject: m[1].trim(),
-      predicate: "is_a",
-      object: m[2].trim(),
-    }),
+    build: (m) => buildConjoinedFacts(m[1].trim(), "is_a", m[2]),
   },
   {
     category: "identity",
     base: 0.88,
     pattern:
-      /\b([A-Z][\w]{1,32})\s+works\s+(?:at|for)\s+([A-Z][\w.\-/+]{0,59})\b/g,
-    build: (m) => ({
-      subject: m[1].trim(),
-      predicate: "works_at",
-      object: m[2].trim(),
-    }),
+      /\b([A-Z][\w]{1,32})\s+works\s+(?:at|for)\s+([A-Z][\w\s.\-/+]{0,80}?)(?=[.\n]|$)/g,
+    build: (m) => buildConjoinedFacts(m[1].trim(), "works_at", m[2]),
   },
 
   // ---- decision ----
@@ -124,17 +303,12 @@ const RULES: RulePack[] = [
     category: "project_state",
     base: 0.78,
     pattern:
-      /\b([A-Za-z][\w\-]{1,32})\s+is\s+using\s+([A-Za-z][\w.\-/+]{0,59})(?:\s+for\s+([A-Za-z][\w\s.\-/+]{0,59}?))?(?=[.\n]|$)/g,
+      /\b([A-Za-z][\w\-]{1,32})\s+is\s+using\s+([A-Za-z][\w\s.\-/+]{0,120}?)(?=[.\n]|$)/g,
     build: (m) => {
       const subj = m[1];
       // Skip pronouns/common words to avoid over-matching
       if (/^(it|he|she|they|we|i|the|a|an)$/i.test(subj)) return null;
-      const purpose = m[3]?.trim();
-      return {
-        subject: subj.trim(),
-        predicate: purpose ? `uses_for_${purpose.replace(/\s+/g, "_")}` : "uses",
-        object: m[2].trim(),
-      };
+      return buildUsingFacts(subj.trim(), m[2]);
     },
   },
   {
@@ -196,28 +370,33 @@ export function extractStructuredFacts(
   opts: ExtractStructuredFactsOptions = {},
 ): ExtractedFact[] {
   if (!text) return [];
+  const processedText = preprocessForExtraction(text);
+  if (processedText === null) return [];
   const out: ExtractedFact[] = [];
 
   for (const rule of RULES) {
     const re = new RegExp(rule.pattern.source, rule.pattern.flags);
-    for (const m of text.matchAll(re)) {
+    for (const m of processedText.matchAll(re)) {
       const built = rule.build(m);
-      if (!built) continue;
+      const builtFacts = normalizeBuiltFacts(built);
+      if (builtFacts.length === 0) continue;
       const span = m[0];
       const { hedge, negated } = detectHedgeAndNegation(span);
+      if (negated) continue;
       let confidence = rule.base;
       if (hedge > 0) confidence -= 0.2 * Math.min(hedge, 2);
-      if (negated) confidence = Math.min(confidence, 0.15);
       confidence = clamp01(confidence);
 
-      out.push({
-        subject: built.subject,
-        predicate: built.predicate,
-        object: built.object,
-        category: rule.category,
-        confidence,
-        source_span: span,
-      });
+      for (const fact of builtFacts) {
+        out.push({
+          subject: fact.subject,
+          predicate: fact.predicate,
+          object: fact.object,
+          category: rule.category,
+          confidence,
+          source_span: span,
+        });
+      }
     }
   }
 

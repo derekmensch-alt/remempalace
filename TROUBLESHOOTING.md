@@ -28,6 +28,70 @@ What you want to see:
 
 ---
 
+## OpenClaw isn't responding
+
+**Symptom:** The OpenClaw UI, Telegram bot, or agent command feels stuck after enabling remempalace.
+
+**First split the problem in two:** the gateway can be healthy while the model provider is overloaded. Check gateway health before blaming memory:
+
+```bash
+openclaw gateway health --timeout 15000
+openclaw gateway probe --timeout 15000
+```
+
+If those are OK but the agent still does not answer, inspect the model/provider logs next. During local testing, Ollama `503` overloads made OpenClaw look unresponsive even while remempalace and the gateway were healthy.
+
+**Expected remempalace process state:** one gateway process and one MemPalace MCP child owned by that gateway:
+
+```bash
+ps -ef | grep -E "openclaw|mempalace" | grep -v grep
+```
+
+You want to see one `openclaw-gateway` and one `/path/to/python -m mempalace.mcp_server`. More than one long-lived `mempalace.mcp_server` child usually means an old plugin build is running or the gateway needs a restart.
+
+**Recovery sequence:**
+
+```bash
+openclaw gateway restart
+sleep 15
+openclaw gateway health --timeout 15000
+ps -ef | grep -E "openclaw|mempalace" | grep -v grep
+```
+
+If health is OK and there is only one MCP child, remempalace is not the bottleneck; check model-provider load, channel connectivity, and agent logs.
+
+For the full release/runtime checklist, see [docs/openclaw-smoke-test.md](docs/openclaw-smoke-test.md).
+
+---
+
+## WSL plugin path is rejected
+
+**Symptom:** OpenClaw refuses to load the plugin from a `/mnt/c/...` path or reports that the plugin path is unsafe/world-writable.
+
+**Cause:** Windows-mounted paths can appear world-writable from WSL. OpenClaw correctly rejects unsafe plugin roots.
+
+**Fix:** Keep the OpenClaw-loaded checkout on a trusted WSL-native path:
+
+```bash
+mkdir -p ~/.openclaw/plugins
+git clone <repo-url> ~/.openclaw/plugins/remempalace
+cd ~/.openclaw/plugins/remempalace
+npm install
+npm run build
+```
+
+Then point OpenClaw at the Linux path:
+
+```json5
+"plugins": {
+  "load": { "paths": ["/home/YOU/.openclaw/plugins/remempalace"] },
+  "allow": ["remempalace"],
+  "slots": { "memory": "remempalace" }
+}
+```
+
+---
+
 ## mempalace module not found
 
 **Symptom:**
@@ -280,7 +344,7 @@ REMEMPALACE_TEST_PY=$(which python3) npm test
 REMEMPALACE_TEST_PY=~/.local/share/pipx/venvs/mempalace/bin/python npm test
 ```
 
-All 136 tests should then pass. If any fail with the env var set, file an issue with the failing test name and full output.
+The integration tests should run instead of being skipped. If any fail with the env var set, file an issue with the failing test name and full output.
 
 ---
 
@@ -332,8 +396,50 @@ If the warning persists with the latest MemPalace, file an issue with the raw `t
 
 ---
 
+## Diary entries lost during replay
+
+**Symptom:** The local JSONL fallback shows diary entries that never got replayed into MemPalace after the MCP write failed.
+
+**How durable replay works:**
+
+remempalace marks an entry replayed only when *either*:
+
+1. A same-cycle persistence probe succeeded (confirmed MCP connectivity + disk write), *OR*
+2. A post-write read confirms the entry is present in MemPalace
+
+If neither condition is met, the entry stays in the JSONL fallback file (`~/.mempalace/palace/diary/`) for the next cycle to retry. This prevents silent data loss when a write-ack doesn't equal actual persistence.
+
+**What this means:**
+
+- If a diary write appears to succeed but the next read shows it isn't there, the entry is kept in JSONL and reattempted at the start of the next session.
+- Check `openclaw plugins inspect remempalace --json` — the `diary.persistenceState` field shows whether replay succeeded (`persistent`), is awaiting verification (`write-ok-unverified`), or is using local JSONL (`fallback-active`).
+- Use `/remempalace status` (available in Phase 6B+) to see replay stats: `last_replay: N/M succeeded, K failed`.
+
+**Fix sequence if entries don't replay:**
+
+1. Check MCP readiness:
+
+   ```bash
+   openclaw gateway call mempalace.diary_read '{"date": "2026-01-01"}'
+   ```
+
+   If this works, MemPalace is up. If it fails, the replay will retry next cycle.
+
+2. Trigger a replay manually by starting a new session. The gateway will attempt to write all pending JSONL entries to MemPalace on the first prompt of the next session.
+
+3. If replay continues to fail, inspect the gateway logs:
+
+   ```bash
+   openclaw logs --level debug | grep -i "diary\|replay"
+   ```
+
+   and file an issue with the error message.
+
+---
+
 ## See also
 
 - [INSTALL.md](INSTALL.md) — first-install walkthrough
 - [CONFIGURATION.md](CONFIGURATION.md) — full config reference
+- [docs/openclaw-smoke-test.md](docs/openclaw-smoke-test.md) — release/runtime smoke checklist
 - [docs/architecture.md](docs/architecture.md) — how the pieces fit together

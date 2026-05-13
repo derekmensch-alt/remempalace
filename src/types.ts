@@ -12,6 +12,7 @@ export interface KgFact {
   object: string;
   valid_from?: string;
   valid_to?: string;
+  source_closet?: string;
   current?: boolean;
 }
 
@@ -50,6 +51,7 @@ export interface RemempalaceConfig {
     capacity: number;
     ttlMs: number;
     kgTtlMs: number;
+    bundleTtlMs: number;
   };
   injection: {
     maxTokens: number;
@@ -59,6 +61,13 @@ export interface RemempalaceConfig {
     knownEntities: string[];
     identityMaxTokens: number;
     rawIdentity: boolean;
+    fastRaceMs: number;
+    /** Stage-level sub-budgets within the shared prompt-path deadline. */
+    budgets: {
+      initMs: number;
+      fetchMs: number;
+      formatMs: number;
+    };
   };
   tiers: {
     l1Threshold: number;
@@ -73,10 +82,19 @@ export interface RemempalaceConfig {
   };
   kg: {
     autoLearn: boolean;
+    learnFromAssistant: boolean;
     batchSize: number;
     flushIntervalMs: number;
     invalidateOnConflict: boolean;
     minConfidence: number;
+  };
+  learning: {
+    /** Extract KG facts from user turns. Default: true. */
+    fromUser: boolean;
+    /** Extract KG facts from assistant turns. Default: false (avoid self-poisoning). */
+    fromAssistant: boolean;
+    /** Extract KG facts from system turns. Default: false (restricted). */
+    fromSystem: boolean;
   };
   prefetch: {
     diaryCount: number;
@@ -89,6 +107,20 @@ export interface RemempalaceConfig {
   };
   memoryRuntime: {
     allowedReadRoots: string[];
+    /** Paths the runtime may write to. Empty list (default) rejects all writes. */
+    allowedWriteRoots: string[];
+  };
+  hotCache: {
+    enabled: boolean;
+    path: string;
+    maxEntries: number;
+    flushIntervalMs: number;
+  };
+  /** Per-backend circuit-breaker configuration. */
+  breaker: {
+    search: { failureThreshold: number; windowMs: number; cooldownMs: number };
+    kg: { failureThreshold: number; windowMs: number; cooldownMs: number };
+    diary: { failureThreshold: number; windowMs: number; cooldownMs: number };
   };
 }
 

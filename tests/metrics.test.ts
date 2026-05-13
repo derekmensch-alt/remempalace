@@ -51,4 +51,12 @@ describe("Metrics", () => {
     m.reset();
     expect(m.snapshot()).toEqual({});
   });
+
+  it("tracks max values independently from additive counters", () => {
+    const m = new Metrics();
+    m.setMax("latency.total.max_ms", 30);
+    m.setMax("latency.total.max_ms", 10);
+    m.setMax("latency.total.max_ms", 45);
+    expect(m.snapshot()["latency.total.max_ms"]).toBe(45);
+  });
 });

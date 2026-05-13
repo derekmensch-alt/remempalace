@@ -104,4 +104,22 @@ describe("extractEntityCandidates", () => {
     });
     expect(result).toContain("remempalace");
   });
+
+  it("maps generic memory-plugin questions to remempalace when configured", () => {
+    const result = extractEntityCandidates("What memory plugin are you using?", {
+      knownEntities: ["OpenClaw", "MemPalace", "remempalace"],
+      maxCandidates: 4,
+      minLength: 3,
+    });
+    expect(result).toContain("remempalace");
+  });
+
+  it("maps generic memory-system questions to remempalace when configured", () => {
+    const result = extractEntityCandidates("Which memory system is active?", {
+      knownEntities: ["OpenClaw", "MemPalace", "remempalace"],
+      maxCandidates: 4,
+      minLength: 3,
+    });
+    expect(result).toContain("remempalace");
+  });
 });

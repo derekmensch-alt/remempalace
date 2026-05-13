@@ -17,7 +17,8 @@
         "properties": {
           "capacity": { "type": "number", "default": 200 },
           "ttlMs": { "type": "number", "default": 300000 },
-          "kgTtlMs": { "type": "number", "default": 600000 }
+          "kgTtlMs": { "type": "number", "default": 600000 },
+          "bundleTtlMs": { "type": "number", "default": 180000, "description": "TTL (ms) for the intent-keyed recall bundle cache. Defaults to 180 000 (3 min). Same-intent follow-up prompts reuse cached bundles within this window." }
         }
       },
       "injection": {
@@ -26,7 +27,15 @@
           "maxTokens": { "type": "number", "default": 800 },
           "budgetPercent": { "type": "number", "default": 0.15 },
           "similarityThreshold": { "type": "number", "default": 0.25 },
-          "useAaak": { "type": "boolean", "default": true }
+          "useAaak": { "type": "boolean", "default": true },
+          "knownEntities": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Extra entity names always considered for KG lookup (appended to the built-in list)."
+          },
+          "identityMaxTokens": { "type": "number", "default": 150, "description": "Token budget for the compacted identity block." },
+          "rawIdentity": { "type": "boolean", "default": false, "description": "Inject raw SOUL.md/IDENTITY.md text instead of the compacted form." },
+          "fastRaceMs": { "type": "number", "default": 50, "description": "Window (ms) to wait for a precomputed recall bundle before falling back to cheap mode. Long enough to use an already-resolved promise; short enough to never block on a fresh MCP round-trip." }
         }
       },
       "tiers": {
@@ -41,15 +50,20 @@
         "type": "object",
         "properties": {
           "enabled": { "type": "boolean", "default": true },
-          "maxEntryTokens": { "type": "number", "default": 500 }
+          "maxEntryTokens": { "type": "number", "default": 500 },
+          "localDir": { "type": "string", "description": "Directory for local JSONL diary fallback. Supports ~ expansion. Default: ~/.mempalace/palace/diary" },
+          "replayOnStart": { "type": "boolean", "default": true, "description": "Replay pending local diary entries to MemPalace when MCP becomes available." }
         }
       },
       "kg": {
         "type": "object",
         "properties": {
           "autoLearn": { "type": "boolean", "default": true },
+          "learnFromAssistant": { "type": "boolean", "default": false, "description": "Extract KG facts from assistant output. Disabled by default to reduce memory poisoning risk." },
           "batchSize": { "type": "number", "default": 5 },
-          "flushIntervalMs": { "type": "number", "default": 30000 }
+          "flushIntervalMs": { "type": "number", "default": 30000 },
+          "invalidateOnConflict": { "type": "boolean", "default": false, "description": "Call mempalace_kg_invalidate on existing facts when a conflicting single-value predicate is learned." },
+          "minConfidence": { "type": "number", "default": 0.6, "description": "Minimum confidence score (0–1) for a structured fact to be written to the KG." }
         }
       },
       "prefetch": {
@@ -57,6 +71,33 @@
         "properties": {
           "diaryCount": { "type": "number", "default": 3 },
           "identityEntities": { "type": "boolean", "default": true }
+        }
+      },
+      "identity": {
+        "type": "object",
+        "properties": {
+          "soulPath": { "type": "string", "description": "Path to SOUL.md. Supports ~ expansion. Default: ~/SOUL.md" },
+          "identityPath": { "type": "string", "description": "Path to IDENTITY.md. Supports ~ expansion. Default: ~/IDENTITY.md" },
+          "maxChars": { "type": "number", "default": 2000, "description": "Maximum characters to read from identity files." }
+        }
+      },
+      "memoryRuntime": {
+        "type": "object",
+        "properties": {
+          "allowedReadRoots": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Filesystem roots the memory runtime is allowed to read. Supports ~ expansion. Default: [~/.mempalace, ~/.openclaw/workspace]"
+          }
+        }
+      },
+      "hotCache": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true, "description": "Enable persisting the hot recall bundle cache to disk across restarts." },
+          "path": { "type": "string", "description": "Path for the hot cache snapshot file. Supports ~ expansion. Default: ~/.mempalace/remempalace/hot-cache.json" },
+          "maxEntries": { "type": "number", "default": 50, "description": "Maximum number of bundle cache entries to persist." },
+          "flushIntervalMs": { "type": "number", "default": 60000, "description": "How often (ms) to flush the hot cache to disk during a session." }
         }
       }
     }

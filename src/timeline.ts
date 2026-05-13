@@ -1,4 +1,4 @@
-import type { McpClient } from "./mcp-client.js";
+import type { MemPalaceRepository } from "./ports/mempalace-repository.js";
 
 const TIMELINE_PATTERNS = [
   /what happened/i,
@@ -20,10 +20,13 @@ export interface TimelineResult {
 
 export interface QueryTimelineOptions {
   daysBack: number;
+  diaryReadTimeoutMs?: number;
 }
 
+const DEFAULT_DIARY_READ_TIMEOUT_MS = 500;
+
 export async function queryTimeline(
-  mcp: McpClient,
+  repository: Pick<MemPalaceRepository, "readDiary" | "readKgTimeline">,
   opts: QueryTimelineOptions,
 ): Promise<TimelineResult> {
   const safe = async <T>(p: Promise<T>, fallback: T): Promise<T> => {
@@ -35,22 +38,32 @@ export async function queryTimeline(
   };
   const [diary, events] = await Promise.all([
     safe(
-      mcp.callTool<Array<{ date: string; content: string }>>(
-        "mempalace_diary_read",
-        { agent_name: "remempalace", last_n: 50 },
-      ),
+      repository.readDiary<unknown>({
+        agentName: "remempalace",
+        lastN: 50,
+        timeoutMs: opts.diaryReadTimeoutMs ?? DEFAULT_DIARY_READ_TIMEOUT_MS,
+      }),
       [],
     ),
-    safe(
-      mcp.callTool<Array<{ date: string; fact: string }>>(
-        "mempalace_kg_timeline",
-        { days_back: opts.daysBack },
-      ),
-      [],
-    ),
+    safe(repository.readKgTimeline({ daysBack: opts.daysBack }), []),
   ]);
   return {
-    diary: Array.isArray(diary) ? diary : [],
+    diary: normalizeDiaryEntries(diary),
     events: Array.isArray(events) ? events : [],
   };
+}
+
+function normalizeDiaryEntries(raw: unknown): Array<{ date: string; content: string }> {
+  const entries = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object" && Array.isArray((raw as { entries?: unknown }).entries)
+      ? (raw as { entries: unknown[] }).entries
+      : [];
+  return entries.filter(
+    (entry): entry is { date: string; content: string } =>
+      !!entry &&
+      typeof entry === "object" &&
+      typeof (entry as { date?: unknown }).date === "string" &&
+      typeof (entry as { content?: unknown }).content === "string",
+  );
 }
