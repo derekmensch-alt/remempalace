@@ -61,6 +61,76 @@ cache on
 
 The file and chunk counts may be zero. That is OK for the MemPalace-backed runtime because the host-facing memory status is a compatibility surface, not the full MemPalace palace inventory.
 
+## 4a. Check remempalace detailed status (Phase 6B+)
+
+After running at least one session with a prompt, check the full status output:
+
+```bash
+openclaw plugins inspect remempalace
+# or for raw JSON:
+openclaw plugins inspect remempalace --json | jq '.status'
+```
+
+Expected fields in `/remempalace status` (available via the gateway or plugin API):
+
+- `health:` one of `healthy`, `degraded`, `offline`
+- `capabilities:` mcp_ready, diary_write, diary_read, kg_writable, etc.
+- `circuit_breakers:` per-backend state (all should be `closed` if healthy)
+- `latency:` at least `before_prompt_build.total` with p50/p95/count after one prompt
+- `diary:` state and persistence status
+- `caches:` search and kg cache hit counts
+- `last_recall:` session key, fact/result counts, timestamp
+
+Example healthy status (abbreviated):
+
+```
+remempalace status — healthy
+
+health: healthy
+last_probe: 2026-05-12T15:42:30.123Z — session_start_complete
+
+capabilities:
+  mcp_ready: yes
+  diary_persistent: yes
+  diary_write: yes
+  diary_read: yes
+  kg_writable: yes
+
+circuit_breakers:
+  search: closed
+  kg: closed
+  diary: closed
+
+latency:
+  before_prompt_build.total: p50=120.5ms p95=180.2ms last=110.0ms n=2
+  before_prompt_build.fetch: p50=85.1ms p95=115.3ms last=80.0ms n=2
+  mempalace_search: p50=65.0ms p95=70.0ms last=68.5ms n=1
+
+diary:
+  state: active
+  persistence: verified
+  pending_fallback: 0
+  last_replay: 3/3 succeeded, 0 failed (2026-05-12T15:40:00Z)
+
+caches:
+  search: 2 hits, 1 misses, 3 entries
+  kg: 1 hits, 0 misses, 1 entries
+
+last_recall:
+  session: session-abc123
+  at: 2026-05-12T15:42:28.456Z
+  prompt: what did we discuss about X?
+  KG facts: 2
+  search results: 3
+  injected lines: 8
+  identity included: yes
+```
+
+Health label rules:
+- `offline` — MCP not ready
+- `degraded` — any circuit breaker open, diary persistence unverified, or any latency stage overrun
+- `healthy` — otherwise
+
 ## 5. Check process count
 
 ```bash

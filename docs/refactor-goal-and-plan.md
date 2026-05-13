@@ -176,18 +176,18 @@ MemPalace MCP server
 
 ### Phase 6 — Observability and operations
 
-- [ ] Redesign `/remempalace status` around health states and last operation summaries.
-- [ ] Add concise probe output: MCP ready, tools present, diary persistent, KG writable, pending fallback count, cache stats, last recall.
-- [ ] Add latency metrics, not just counters: `before_prompt_build`, `mempalace_search`, `mempalace_kg_query`, diary read/write, formatting, and token-budget work.
-- [ ] Show latency summaries in `/remempalace status` so slow recall, KG, search, diary, formatting, and token-budget work are visible.
-- [ ] Add stage-level prompt-path latency metrics (`init`, `timeline/recall fetch`, `formatting`) with bounded sub-budgets.
-- [ ] Add backend circuit breakers: if MemPalace search, KG, or diary times out/fails repeatedly, disable that backend briefly and serve local/cache-only memory during cooldown.
-- [ ] Keep status/health probes out of the prompt path; prompt build should consume cached health, not discover backend health synchronously.
-- [ ] Keep opt-in debug logging but avoid dumping full prompt content by default.
-- [ ] Prefer user-facing health labels (`healthy`, `degraded`, `offline`) with latest probe reason and replay outcome in `/remempalace status`.
-- [ ] Persist a small hot recall/health cache across plugin restarts to reduce cold-start latency.
-- [ ] Update `TROUBLESHOOTING.md`, `CONFIGURATION.md`, and smoke test docs.
-- [ ] Gate: manual `/remempalace status` check plus smoke script.
+- [x] Redesign `/remempalace status` around health states and last operation summaries.
+- [x] Add concise probe output: MCP ready, tools present, diary persistent, KG writable, pending fallback count, cache stats, last recall.
+- [x] Add latency metrics, not just counters: `before_prompt_build`, `mempalace_search`, `mempalace_kg_query`, diary read/write, formatting, and token-budget work.
+- [x] Show latency summaries in `/remempalace status` so slow recall, KG, search, diary, formatting, and token-budget work are visible.
+- [x] Add stage-level prompt-path latency metrics (`init`, `timeline/recall fetch`, `formatting`) with bounded sub-budgets (`cfg.injection.budgets.{initMs,fetchMs,formatMs}` defaults 200/1100/200; advisory — total 1500ms deadline still controls aborts).
+- [x] Add backend circuit breakers (`src/services/circuit-breaker.ts`, applied in the adapter; `cfg.breaker.{search,kg,diary}.{failureThreshold,windowMs,cooldownMs}` defaults 3/10000/15000; open state fails fast with `BackendUnavailable`).
+- [x] Keep status/health probes out of the prompt path; prompt build consumes cached health.
+- [x] Avoid dumping full prompt content in default debug logs.
+- [x] User-facing health labels (`healthy`/`degraded`/`offline`) with latest probe reason and replay outcome in `/remempalace status`.
+- [x] Hot recall/health cache persisted across plugin restarts (done in Phase 3).
+- [x] Update `TROUBLESHOOTING.md`, `CONFIGURATION.md`, and smoke test docs.
+- [ ] Gate: manual `/remempalace status` check plus smoke script (test suite green; manual smoke deferred to release prep).
 
 ### Performance fast path — recommended first patch
 
@@ -204,8 +204,8 @@ MemPalace MCP server
 
 ### Reliability hardening — persistence semantics
 
-- [ ] Ensure diary replay does not mark JSONL entries replayed on write-ack alone; require post-write read verification or a fresh successful persistence probe in the same replay cycle.
-- [ ] Keep operational health/fallback state out of prompt injection and fully visible in `/remempalace status` and logs.
+- [x] Diary replay no longer marks JSONL entries replayed on write-ack alone; requires same-cycle successful persistence probe or post-write read verification.
+- [x] Operational health/fallback state stays out of prompt injection and is visible in `/remempalace status`.
 
 ### Phase 7 — Final acceptance
 
@@ -233,9 +233,9 @@ The refactor is successful if:
 
 - Created: 2026-05-11
 - Owner: main OpenClaw assistant session
-- Last updated: 2026-05-12T21:51:00-04:00
-- Status: Phases 0–5 complete. Phase 3 closed with hot health/status cache persistence and fast-path docs. Phase 4 closed with `LearningService` (`src/services/learning-service.ts`), explicit role policy (`cfg.learning.fromUser|fromAssistant|fromSystem`), and `remember <X>` enqueue (`forget` logged-only, triple resolution deferred).
-- Current gate: `npm run lint` and `npm test` pass in the default suite. Latest local full test run observed 525 passed / 6 skipped across 36 test files (38 total including 2 skipped).
+- Last updated: 2026-05-12T22:14:00-04:00
+- Status: Phases 0–6 complete (manual `/remempalace status` smoke deferred to release prep). Phase 3 closed with hot health/status cache persistence and fast-path docs. Phase 4 closed with `LearningService` (`src/services/learning-service.ts`), explicit role policy (`cfg.learning.fromUser|fromAssistant|fromSystem`), and `remember <X>` enqueue (`forget` logged-only, triple resolution deferred).
+- Current gate: `npm run lint` and `npm test` pass in the default suite. Latest local full test run observed 578 passed / 6 skipped across 38 test files (40 total including 2 skipped).
 - Boundary check: raw `callTool(` usage is isolated to `src/adapters/mcp-mempalace-repository.ts` (verified by grep).
 - Handoff details: see `docs/current-refactor-status.md`.
-- Immediate next task: Phase 6 — observability and operations (redesign `/remempalace status` around health states, add latency metrics, stage-level prompt-path sub-budgets, backend circuit breakers).
+- Immediate next task: Phase 7 — final acceptance gates (build, lint, test, optional live-backend integration probe, manual `/remempalace status` smoke, real prompt-build verification).

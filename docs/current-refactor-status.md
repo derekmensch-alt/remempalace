@@ -1,10 +1,10 @@
 # Current Refactor Status
 
-Updated: 2026-05-12T21:51:00-04:00
+Updated: 2026-05-12T22:14:00-04:00
 
 ## Summary
 
-The remempalace refactor has completed Phases 0–5. Phases 6–7 remain.
+The remempalace refactor has completed Phases 0–6. Phase 7 (final acceptance) remains.
 
 Current default gate:
 
@@ -16,8 +16,8 @@ npm test
 Latest observed default test result:
 
 ```text
-Test Files  36 passed | 2 skipped (38)
-Tests       525 passed | 6 skipped (531)
+Test Files  38 passed | 2 skipped (40)
+Tests       578 passed | 6 skipped (584)
 ```
 
 ## Completed
@@ -98,9 +98,26 @@ The worktree contains many modified files plus untracked docs, adapter/port/serv
 - `tests/memory-runtime.test.ts` mock is now a full `MemPalaceRepository`, which proves the port boundary at compile time. +7 tests (6 writeFile sandbox, 1 search-via-port).
 - Boundary check: `grep -rn "callTool(" src/` outside `src/adapters/mcp-mempalace-repository.ts` returns zero hits.
 
+## Phase 6 Completion
+
+**6A — metrics + sub-budgets + breakers:**
+- `src/services/metrics-service.ts` — per-stage ring buffer (128 samples), `recordLatency(stage, ms)`, `snapshot()` → `{count, p50, p95, lastMs}`.
+- `src/services/circuit-breaker.ts` — `closed → open → half-open` state machine + `BackendCircuitBreakers` wrapper for `search`/`kg`/`diary`.
+- Instrumented stages: `before_prompt_build.{total,init,fetch,format}`, `mempalace_search`, `mempalace_kg_query`, `diary_read`, `diary_write`.
+- Sub-budgets: `cfg.injection.budgets.{initMs:200, fetchMs:1100, formatMs:200}` — advisory; overrun emits warn log + `*.overrun` counter, does not abort.
+- Breakers applied in the adapter layer; open state fails fast with `BackendUnavailable`. Config: `cfg.breaker.{search,kg,diary}.{failureThreshold:3, windowMs:10000, cooldownMs:15000}`.
+
+**6B — status redesign + durable replay:**
+- `src/status-command.ts` redesigned around health label (`healthy`/`degraded`/`offline`), capabilities, circuit-breaker states, latency p50/p95 per instrumented stage (zero-sample stages omitted), diary state, caches, last recall.
+- Health rule: `offline` if MCP not ready; `degraded` if any breaker open OR diary in `write-ok-unverified`/`fallback-active` OR any `*.overrun` > 0; else `healthy`.
+- `src/diary-replay.ts` durable-aware: an entry is only marked replayed when (a) a same-cycle persistence probe succeeded OR (b) a post-write read confirms the entry. Otherwise it stays in the JSONL fallback for the next cycle.
+- Probes stay off the prompt path; the status command reads cached `lastHealthProbeAt`/`lastHealthProbeReason`.
+
+**6C — docs:** `CONFIGURATION.md` extended for `injection.budgets.*` and `breaker.*`; `TROUBLESHOOTING.md` extended with durable-replay diagnostics; `docs/openclaw-smoke-test.md` adds a new `/remempalace status` smoke section.
+
 ## Next Recommended Slice
 
-Begin Phase 6 — observability and operations. Redesign `/remempalace status` around health states (`healthy`/`degraded`/`offline`), add latency metrics (p50/p95 per stage), stage-level prompt-path sub-budgets (`init`, `fetch`, `format`), backend circuit breakers, and durable-aware diary replay marking.
+Begin Phase 7 — final acceptance. Run `npm run build`, manual `/remempalace status` smoke against a live session, optional gated integration probe (`REMEMPALACE_TEST_PY=...`), and verify a real prompt build injects exactly one bounded memory block. After that, the refactor is shippable against the north-star goal.
 
 ## Newly Added Backlog (Speed + Intuition)
 

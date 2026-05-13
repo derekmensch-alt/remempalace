@@ -106,6 +106,9 @@ Controls how much memory remempalace puts into the prompt and how it's formatted
 | `identityMaxTokens` | `number` | `150` | Token budget for the SOUL.md/IDENTITY.md block specifically. Separate from `maxTokens` so identity isn't crowded out by recall on long turns. |
 | `rawIdentity` | `boolean` | `false` | If `true`, identity is injected verbatim instead of AAAK-compressed. Useful if your SOUL.md uses syntax that doesn't compress well, or for debugging. |
 | `fastRaceMs` | `number` | `50` | In `before_prompt_build`, this is the window (in ms) during which cheap-tier sources (`cache`, `identity`, `last session`) are allowed to return before the full-recall backend (`search`, `kg_query`) is started. If cheap sources hit within this window, full recall is cancelled and only cheap results are used. Trades latency for completeness: set lower to always wait for full recall, or raise it to prefer cached/cheap sources and skip expensive backend calls. |
+| `budgets.initMs` | `number` | `200` | Sub-budget (ms) for the MCP-ready wait stage of `before_prompt_build`. If exceeded, a warn log is emitted and an `init.overrun` counter is incremented, but execution continues. The total 1500 ms deadline always takes precedence. |
+| `budgets.fetchMs` | `number` | `1100` | Sub-budget (ms) for timeline + full recall (search + KG) stage. Advisory only; overruns increment `fetch.overrun` counter. |
+| `budgets.formatMs` | `number` | `200` | Sub-budget (ms) for tiered injection + token-budget formatting. Advisory only; overruns increment `format.overrun` counter. |
 
 When to tune:
 
@@ -252,6 +255,35 @@ When to tune:
 
 ---
 
+## `breaker`
+
+Per-backend circuit breaker configuration. When a backend hits its failure threshold within the window, the breaker trips and fast-fails subsequent calls with `BackendUnavailable` during cooldown.
+
+| Field | Type | Default | What it controls |
+|-------|------|---------|------------------|
+| `search.failureThreshold` | `number` | `3` | Number of consecutive failures (within `windowMs`) that trip the search breaker. |
+| `search.windowMs` | `number` | `10000` | Window (ms) over which consecutive failures are counted for search. |
+| `search.cooldownMs` | `number` | `15000` | How long (ms) the search breaker stays open before allowing a trial call. |
+| `kg.failureThreshold` | `number` | `3` | Failure threshold for KG queries. |
+| `kg.windowMs` | `number` | `10000` | Window (ms) for KG failure counting. |
+| `kg.cooldownMs` | `number` | `15000` | Cooldown (ms) for KG breaker. |
+| `diary.failureThreshold` | `number` | `3` | Failure threshold for diary read/write. |
+| `diary.windowMs` | `number` | `10000` | Window (ms) for diary failure counting. |
+| `diary.cooldownMs` | `number` | `15000` | Cooldown (ms) for diary breaker. |
+
+Breaker states:
+- **closed** — normal operation; failures increment counter
+- **open** — fast-fail; all calls throw `BackendUnavailable` until cooldown expires
+- **half-open** — after cooldown, one trial call is allowed; success resets to closed, failure returns to open
+
+When to tune:
+
+- **Lower `failureThreshold`** to trip breakers faster on an unstable backend (e.g., `1` or `2`).
+- **Raise `cooldownMs`** if your backend needs more recovery time between outages.
+- **Lower `windowMs`** to age out failures faster in high-churn environments.
+
+---
+
 ## Recall modes and prompt-path deadlines
 
 remempalace uses adaptive recall to keep `before_prompt_build` fast. The plugin automatically classifies user prompts and selects the right recall strategy:
@@ -327,7 +359,12 @@ A complete config showing every option at its default value, with comments on th
             "knownEntities": ["OpenClaw", "MemPalace", "remempalace", "Anthropic", "Claude"],
             "identityMaxTokens": 150,
             "rawIdentity": false,
-            "fastRaceMs": 50
+            "fastRaceMs": 50,
+            "budgets": {
+              "initMs": 200,
+              "fetchMs": 1100,
+              "formatMs": 200
+            }
           },
 
           "tiers": {
@@ -368,6 +405,12 @@ A complete config showing every option at its default value, with comments on th
             "path": "~/.mempalace/remempalace/hot-cache.json",
             "maxEntries": 50,
             "flushIntervalMs": 60000
+          },
+
+          "breaker": {
+            "search": { "failureThreshold": 3, "windowMs": 10000, "cooldownMs": 15000 },
+            "kg": { "failureThreshold": 3, "windowMs": 10000, "cooldownMs": 15000 },
+            "diary": { "failureThreshold": 3, "windowMs": 10000, "cooldownMs": 15000 }
           }
         }
       }

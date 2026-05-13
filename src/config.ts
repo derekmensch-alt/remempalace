@@ -29,6 +29,11 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
     identityMaxTokens: 150,
     rawIdentity: false,
     fastRaceMs: 50,
+    budgets: {
+      initMs: 200,
+      fetchMs: 1100,
+      formatMs: 200,
+    },
   },
   tiers: { l1Threshold: 0.3, l2Threshold: 0.25, l2BudgetFloor: 0.5 },
   diary: {
@@ -70,6 +75,11 @@ export const DEFAULT_CONFIG: RemempalaceConfig = {
     maxEntries: 50,
     flushIntervalMs: 60_000,
   },
+  breaker: {
+    search: { failureThreshold: 3, windowMs: 10_000, cooldownMs: 15_000 },
+    kg: { failureThreshold: 3, windowMs: 10_000, cooldownMs: 15_000 },
+    diary: { failureThreshold: 3, windowMs: 10_000, cooldownMs: 15_000 },
+  },
 };
 
 export function mergeConfig(
@@ -100,7 +110,14 @@ export function mergeConfig(
   return {
     mcpPythonBin: user.mcpPythonBin ?? DEFAULT_CONFIG.mcpPythonBin,
     cache: { ...DEFAULT_CONFIG.cache, ...user.cache },
-    injection: { ...DEFAULT_CONFIG.injection, ...user.injection },
+    injection: {
+      ...DEFAULT_CONFIG.injection,
+      ...user.injection,
+      budgets: {
+        ...DEFAULT_CONFIG.injection.budgets,
+        ...user.injection?.budgets,
+      },
+    },
     tiers: { ...DEFAULT_CONFIG.tiers, ...user.tiers },
     diary: {
       ...DEFAULT_CONFIG.diary,
@@ -117,6 +134,11 @@ export function mergeConfig(
       path: expandTilde(mergedHotCache.path),
       maxEntries: mergedHotCache.maxEntries,
       flushIntervalMs: mergedHotCache.flushIntervalMs,
+    },
+    breaker: {
+      search: { ...DEFAULT_CONFIG.breaker.search, ...user.breaker?.search },
+      kg: { ...DEFAULT_CONFIG.breaker.kg, ...user.breaker?.kg },
+      diary: { ...DEFAULT_CONFIG.breaker.diary, ...user.breaker?.diary },
     },
   };
 }

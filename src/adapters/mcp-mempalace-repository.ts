@@ -18,6 +18,8 @@ import {
   ToolFailed,
 } from "../ports/mempalace-repository.js";
 import type { KgFact, PalaceStatus, SearchResult } from "../types.js";
+import type { LatencyMetricsService } from "../services/metrics-service.js";
+import type { BackendCircuitBreakers } from "../services/circuit-breaker.js";
 
 interface McpToolClient {
   hasDiaryWrite: boolean;
@@ -30,11 +32,24 @@ interface McpToolClient {
   ): Promise<T>;
 }
 
+export interface McpMemPalaceRepositoryOptions {
+  latency?: LatencyMetricsService;
+  breakers?: BackendCircuitBreakers;
+}
+
 export class McpMemPalaceRepository implements MemPalaceRepository {
   private persistenceState: DiaryPersistenceState = "unavailable";
   private readonly diaryProbeTimeoutMs = 500;
+  private readonly latency?: LatencyMetricsService;
+  private readonly breakers?: BackendCircuitBreakers;
 
-  constructor(private readonly mcp: McpToolClient) {}
+  constructor(
+    private readonly mcp: McpToolClient,
+    opts?: McpMemPalaceRepositoryOptions,
+  ) {
+    this.latency = opts?.latency;
+    this.breakers = opts?.breakers;
+  }
 
   get canWriteDiary(): boolean {
     return this.mcp.hasDiaryWrite;
@@ -66,35 +81,61 @@ export class McpMemPalaceRepository implements MemPalaceRepository {
   }
 
   async searchMemory(request: MemorySearchRequest): Promise<SearchResult[]> {
+    const t0 = Date.now();
+    const run = async (): Promise<SearchResult[]> => {
+      try {
+        const args = {
+          query: request.query,
+          limit: request.limit,
+        };
+        const raw =
+          request.timeoutMs === undefined
+            ? await this.mcp.callTool<{ results?: SearchResult[] }>("mempalace_search", args)
+            : await this.mcp.callTool<{ results?: SearchResult[] }>(
+                "mempalace_search",
+                args,
+                request.timeoutMs,
+              );
+        return raw.results ?? [];
+      } catch (err) {
+        throw mapMcpToolError("mempalace_search", err);
+      }
+    };
     try {
-      const args = {
-        query: request.query,
-        limit: request.limit,
-      };
-      const raw =
-        request.timeoutMs === undefined
-          ? await this.mcp.callTool<{ results?: SearchResult[] }>("mempalace_search", args)
-          : await this.mcp.callTool<{ results?: SearchResult[] }>(
-              "mempalace_search",
-              args,
-              request.timeoutMs,
-            );
-      return raw.results ?? [];
+      const result = this.breakers
+        ? await this.breakers.search.call(run)
+        : await run();
+      this.latency?.recordLatency("mempalace_search", Date.now() - t0);
+      return result;
     } catch (err) {
-      throw mapMcpToolError("mempalace_search", err);
+      this.latency?.recordLatency("mempalace_search", Date.now() - t0);
+      throw err;
     }
   }
 
   async queryKgEntity(request: KgEntityQueryRequest): Promise<unknown> {
+    const t0 = Date.now();
+    const run = async (): Promise<unknown> => {
+      try {
+        const args = {
+          entity: request.entity,
+        };
+        return request.timeoutMs === undefined
+          ? await this.mcp.callTool<unknown>("mempalace_kg_query", args)
+          : await this.mcp.callTool<unknown>("mempalace_kg_query", args, request.timeoutMs);
+      } catch (err) {
+        throw mapMcpToolError("mempalace_kg_query", err);
+      }
+    };
     try {
-      const args = {
-        entity: request.entity,
-      };
-      return request.timeoutMs === undefined
-        ? await this.mcp.callTool<unknown>("mempalace_kg_query", args)
-        : await this.mcp.callTool<unknown>("mempalace_kg_query", args, request.timeoutMs);
+      const result = this.breakers
+        ? await this.breakers.kg.call(run)
+        : await run();
+      this.latency?.recordLatency("mempalace_kg_query", Date.now() - t0);
+      return result;
     } catch (err) {
-      throw mapMcpToolError("mempalace_kg_query", err);
+      this.latency?.recordLatency("mempalace_kg_query", Date.now() - t0);
+      throw err;
     }
   }
 
@@ -137,34 +178,60 @@ export class McpMemPalaceRepository implements MemPalaceRepository {
 
   async writeDiary(request: DiaryWriteRequest): Promise<unknown> {
     if (!this.canWriteDiary) throw new CapabilityMissing("mempalace_diary_write");
+    const t0 = Date.now();
+    const run = async (): Promise<unknown> => {
+      try {
+        const args = {
+          agent_name: request.agentName,
+          entry: request.entry,
+          topic: request.topic,
+          ...(request.wing ? { wing: request.wing } : {}),
+        };
+        return request.timeoutMs === undefined
+          ? await this.mcp.callTool("mempalace_diary_write", args)
+          : await this.mcp.callTool("mempalace_diary_write", args, request.timeoutMs);
+      } catch (err) {
+        throw mapMcpToolError("mempalace_diary_write", err);
+      }
+    };
     try {
-      const args = {
-        agent_name: request.agentName,
-        entry: request.entry,
-        topic: request.topic,
-        ...(request.wing ? { wing: request.wing } : {}),
-      };
-      return request.timeoutMs === undefined
-        ? await this.mcp.callTool("mempalace_diary_write", args)
-        : await this.mcp.callTool("mempalace_diary_write", args, request.timeoutMs);
+      const result = this.breakers
+        ? await this.breakers.diary.call(run)
+        : await run();
+      this.latency?.recordLatency("diary_write", Date.now() - t0);
+      return result;
     } catch (err) {
-      throw mapMcpToolError("mempalace_diary_write", err);
+      this.latency?.recordLatency("diary_write", Date.now() - t0);
+      throw err;
     }
   }
 
   async readDiary<T = unknown>(request: DiaryReadRequest): Promise<T> {
     if (!this.canReadDiary) throw new CapabilityMissing("mempalace_diary_read");
+    const t0 = Date.now();
+    const run = async (): Promise<T> => {
+      try {
+        const args = {
+          agent_name: request.agentName,
+          ...(request.lastN === undefined ? {} : { last_n: request.lastN }),
+          ...(request.topic ? { topic: request.topic } : {}),
+        };
+        return request.timeoutMs === undefined
+          ? await this.mcp.callTool<T>("mempalace_diary_read", args)
+          : await this.mcp.callTool<T>("mempalace_diary_read", args, request.timeoutMs);
+      } catch (err) {
+        throw mapMcpToolError("mempalace_diary_read", err);
+      }
+    };
     try {
-      const args = {
-        agent_name: request.agentName,
-        ...(request.lastN === undefined ? {} : { last_n: request.lastN }),
-        ...(request.topic ? { topic: request.topic } : {}),
-      };
-      return request.timeoutMs === undefined
-        ? await this.mcp.callTool<T>("mempalace_diary_read", args)
-        : await this.mcp.callTool<T>("mempalace_diary_read", args, request.timeoutMs);
+      const result = this.breakers
+        ? await this.breakers.diary.call(run)
+        : await run();
+      this.latency?.recordLatency("diary_read", Date.now() - t0);
+      return result;
     } catch (err) {
-      throw mapMcpToolError("mempalace_diary_read", err);
+      this.latency?.recordLatency("diary_read", Date.now() - t0);
+      throw err;
     }
   }
 

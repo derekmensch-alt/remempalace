@@ -396,6 +396,47 @@ If the warning persists with the latest MemPalace, file an issue with the raw `t
 
 ---
 
+## Diary entries lost during replay
+
+**Symptom:** The local JSONL fallback shows diary entries that never got replayed into MemPalace after the MCP write failed.
+
+**How durable replay works:**
+
+remempalace marks an entry replayed only when *either*:
+
+1. A same-cycle persistence probe succeeded (confirmed MCP connectivity + disk write), *OR*
+2. A post-write read confirms the entry is present in MemPalace
+
+If neither condition is met, the entry stays in the JSONL fallback file (`~/.mempalace/palace/diary/`) for the next cycle to retry. This prevents silent data loss when a write-ack doesn't equal actual persistence.
+
+**What this means:**
+
+- If a diary write appears to succeed but the next read shows it isn't there, the entry is kept in JSONL and reattempted at the start of the next session.
+- Check `openclaw plugins inspect remempalace --json` — the `diary.persistenceState` field shows whether replay succeeded (`persistent`), is awaiting verification (`write-ok-unverified`), or is using local JSONL (`fallback-active`).
+- Use `/remempalace status` (available in Phase 6B+) to see replay stats: `last_replay: N/M succeeded, K failed`.
+
+**Fix sequence if entries don't replay:**
+
+1. Check MCP readiness:
+
+   ```bash
+   openclaw gateway call mempalace.diary_read '{"date": "2026-01-01"}'
+   ```
+
+   If this works, MemPalace is up. If it fails, the replay will retry next cycle.
+
+2. Trigger a replay manually by starting a new session. The gateway will attempt to write all pending JSONL entries to MemPalace on the first prompt of the next session.
+
+3. If replay continues to fail, inspect the gateway logs:
+
+   ```bash
+   openclaw logs --level debug | grep -i "diary\|replay"
+   ```
+
+   and file an issue with the error message.
+
+---
+
 ## See also
 
 - [INSTALL.md](INSTALL.md) — first-install walkthrough

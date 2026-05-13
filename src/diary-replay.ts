@@ -31,7 +31,7 @@ export interface ReplayResult {
 export interface DiaryReconcilerOptions {
   diaryDir: string;
   repository?: Pick<MemPalaceRepository, "canPersistDiary" | "writeDiary"> &
-    Partial<Pick<MemPalaceRepository, "verifyDiaryPersistence">>;
+    Partial<Pick<MemPalaceRepository, "verifyDiaryPersistence" | "canReadDiary" | "readDiary">>;
   metrics?: Metrics;
   /** Minimum ms between replay attempts. Defaults to 0 (no throttle). */
   minIntervalMs?: number;
@@ -115,6 +115,16 @@ export class DiaryReconciler {
       return result;
     }
 
+    // Durable-aware marking gate: determine which verification path is available.
+    //
+    // We require one of the following before marking any entry replayed:
+    //   (A) A fresh persistence probe in this cycle returned verified=true.
+    //   (B) No probe available but canReadDiary is true — we will do a
+    //       post-write batch read to confirm entries persisted.
+    //
+    // If neither is available, entries are written to the backend but NOT
+    // marked replayed (they will be retried next cycle).
+    let probePassed = false;
     if (repository.verifyDiaryPersistence) {
       const probe = await repository.verifyDiaryPersistence({ timeoutMs: DIARY_IO_TIMEOUT_MS });
       if (!probe.verified || !repository.canPersistDiary) {
@@ -123,7 +133,11 @@ export class DiaryReconciler {
         this.lastReplayResult = result;
         return result;
       }
+      // (A) Same-cycle probe succeeded — entries may be marked after write-ack.
+      probePassed = true;
     }
+    // (B) canReadDiary without verifyDiaryPersistence: post-write batch read
+    //     verification will run at the end. probePassed stays false here.
 
     const minInterval = this.opts.minIntervalMs ?? 0;
     if (minInterval > 0 && this.lastReplayResult && at - this.lastReplayResult.at < minInterval) {
@@ -143,6 +157,9 @@ export class DiaryReconciler {
 
     let succeeded = 0;
     let failed = 0;
+    // writtenEntries collects entries that received a write-ack — used for
+    // post-write read verification when probePassed is false.
+    const writtenEntries: Array<{ date: string; lineNo: number; content: string }> = [];
     const successByDate = new Map<string, number[]>();
     const seenIds = new Set<string>();
     let lastError: string | null = null;
@@ -150,10 +167,13 @@ export class DiaryReconciler {
     for (const p of pending) {
       if (p.entry.id) {
         if (seenIds.has(p.entry.id)) {
-          // Duplicate id within this batch — mark as done without re-sending
-          const list = successByDate.get(p.date) ?? [];
-          list.push(p.lineNo);
-          successByDate.set(p.date, list);
+          // Duplicate id within this batch — mark as done without re-sending.
+          // Only mark if we can verify (probe passed or will do read verify).
+          if (probePassed || repository.canReadDiary) {
+            const list = successByDate.get(p.date) ?? [];
+            list.push(p.lineNo);
+            successByDate.set(p.date, list);
+          }
           continue;
         }
         seenIds.add(p.entry.id);
@@ -168,14 +188,57 @@ export class DiaryReconciler {
         });
         succeeded++;
         this.opts.metrics?.inc("diary.replay.succeeded");
-        const list = successByDate.get(p.date) ?? [];
-        list.push(p.lineNo);
-        successByDate.set(p.date, list);
+        if (probePassed) {
+          // (A) Same-cycle probe passed: mark replayed immediately on write-ack.
+          const list = successByDate.get(p.date) ?? [];
+          list.push(p.lineNo);
+          successByDate.set(p.date, list);
+        } else {
+          // (B) No probe — collect for post-write read verification.
+          writtenEntries.push({ date: p.date, lineNo: p.lineNo, content: p.entry.content });
+        }
       } catch (err) {
         failed++;
         lastError = err instanceof Error ? err.message : String(err);
         this.opts.metrics?.inc("diary.replay.failed");
       }
+    }
+
+    // (B) Post-write read verification: check that written entries appear in the
+    //     backend diary before marking them as replayed.
+    if (!probePassed && writtenEntries.length > 0 && repository.canReadDiary && repository.readDiary) {
+      let verifiedContents: Set<string> | null = null;
+      try {
+        const readResult = await repository.readDiary<{ entries?: Array<{ content?: string }> }>({
+          agentName: "remempalace",
+          lastN: Math.max(20, writtenEntries.length * 2),
+          timeoutMs: DIARY_IO_TIMEOUT_MS,
+        });
+        const entries =
+          Array.isArray(readResult)
+            ? (readResult as Array<{ content?: string }>)
+            : (readResult?.entries ?? []);
+        verifiedContents = new Set(
+          entries
+            .filter((e): e is { content: string } => typeof e?.content === "string")
+            .map((e) => e.content),
+        );
+      } catch {
+        // Read failed — leave all written entries unmarked for next cycle.
+        verifiedContents = null;
+      }
+
+      if (verifiedContents !== null) {
+        for (const w of writtenEntries) {
+          if (verifiedContents.has(w.content)) {
+            const list = successByDate.get(w.date) ?? [];
+            list.push(w.lineNo);
+            successByDate.set(w.date, list);
+          }
+          // If not found in read result, leave unmarked (next cycle will retry).
+        }
+      }
+      // verifiedContents === null: read failed; all written entries stay unmarked.
     }
 
     for (const [date, lineNos] of successByDate) {

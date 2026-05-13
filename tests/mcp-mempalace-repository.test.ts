@@ -412,3 +412,70 @@ describe("McpMemPalaceRepository", () => {
     );
   });
 });
+
+describe("McpMemPalaceRepository — latency instrumentation", () => {
+  it("records latency for mempalace_search via LatencyMetricsService", async () => {
+    const { LatencyMetricsService } = await import("../src/services/metrics-service.js");
+    const latency = new LatencyMetricsService();
+    const callTool = vi.fn().mockResolvedValue({ results: [] });
+    const repo = new McpMemPalaceRepository(makeMcp({ callTool }), { latency });
+
+    await repo.searchMemory({ query: "test", limit: 3 });
+
+    const snap = latency.snapshot();
+    expect(snap["mempalace_search"]).toBeDefined();
+    expect(snap["mempalace_search"].count).toBe(1);
+    expect(snap["mempalace_search"].lastMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("records latency for mempalace_kg_query via LatencyMetricsService", async () => {
+    const { LatencyMetricsService } = await import("../src/services/metrics-service.js");
+    const latency = new LatencyMetricsService();
+    const callTool = vi.fn().mockResolvedValue({ facts: [] });
+    const repo = new McpMemPalaceRepository(makeMcp({ callTool }), { latency });
+
+    await repo.queryKgEntity({ entity: "Derek" });
+
+    const snap = latency.snapshot();
+    expect(snap["mempalace_kg_query"]).toBeDefined();
+    expect(snap["mempalace_kg_query"].count).toBe(1);
+  });
+
+  it("records latency for diary_write via LatencyMetricsService", async () => {
+    const { LatencyMetricsService } = await import("../src/services/metrics-service.js");
+    const latency = new LatencyMetricsService();
+    const callTool = vi.fn().mockResolvedValue({});
+    const repo = new McpMemPalaceRepository(makeMcp({ callTool }), { latency });
+
+    await repo.writeDiary({ agentName: "remempalace", entry: "test", topic: "session" });
+
+    const snap = latency.snapshot();
+    expect(snap["diary_write"]).toBeDefined();
+    expect(snap["diary_write"].count).toBe(1);
+  });
+
+  it("records latency for diary_read via LatencyMetricsService", async () => {
+    const { LatencyMetricsService } = await import("../src/services/metrics-service.js");
+    const latency = new LatencyMetricsService();
+    const callTool = vi.fn().mockResolvedValue({ entries: [] });
+    const repo = new McpMemPalaceRepository(makeMcp({ callTool }), { latency });
+
+    await repo.readDiary({ agentName: "remempalace", lastN: 5 });
+
+    const snap = latency.snapshot();
+    expect(snap["diary_read"]).toBeDefined();
+    expect(snap["diary_read"].count).toBe(1);
+  });
+
+  it("still records latency when the call fails", async () => {
+    const { LatencyMetricsService } = await import("../src/services/metrics-service.js");
+    const latency = new LatencyMetricsService();
+    const callTool = vi.fn().mockRejectedValue(new Error("timed out"));
+    const repo = new McpMemPalaceRepository(makeMcp({ callTool }), { latency });
+
+    await repo.searchMemory({ query: "fail", limit: 1 }).catch(() => {});
+
+    const snap = latency.snapshot();
+    expect(snap["mempalace_search"].count).toBe(1);
+  });
+});

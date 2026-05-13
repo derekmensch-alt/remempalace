@@ -97,6 +97,11 @@ describe("DiaryReconciler.loadPending", () => {
   });
 });
 
+/** Convenience: a verifyDiaryPersistence mock that always returns verified. */
+function probeOk() {
+  return vi.fn().mockResolvedValue({ state: "persistent", verified: true });
+}
+
 describe("DiaryReconciler.replay", () => {
   it("calls mempalace_diary_write for every pending entry", async () => {
     await writeJsonl(join(dir, "2026-04-22.jsonl"), [
@@ -106,7 +111,7 @@ describe("DiaryReconciler.replay", () => {
     const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
     });
     const result = await r.replay();
     expect(writeDiary).toHaveBeenCalledTimes(2);
@@ -126,7 +131,7 @@ describe("DiaryReconciler.replay", () => {
     const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
     });
     await r.replay();
     const sidecar = await readFile(join(dir, "2026-04-22.replayed"), "utf8");
@@ -144,7 +149,7 @@ describe("DiaryReconciler.replay", () => {
       .mockRejectedValueOnce(new Error("boom"));
     const r = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
     });
     const result = await r.replay();
     expect(result.succeeded).toBe(1);
@@ -208,7 +213,7 @@ describe("DiaryReconciler.replay", () => {
     const metrics = new Metrics();
     const r = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
       metrics,
     });
     await r.replay();
@@ -226,14 +231,14 @@ describe("DiaryReconciler.replay", () => {
     const writeDiary = vi.fn().mockResolvedValue({});
     const r1 = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
     });
     await r1.replay();
     expect(writeDiary).toHaveBeenCalledTimes(2);
 
     const r2 = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
     });
     const result2 = await r2.replay();
     expect(writeDiary).toHaveBeenCalledTimes(2);
@@ -245,7 +250,7 @@ describe("DiaryReconciler.replay", () => {
     const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
     });
     expect(r.lastReplayResult).toBeNull();
     await r.replay();
@@ -259,7 +264,7 @@ describe("DiaryReconciler.replay", () => {
     const writeDiary = vi.fn().mockRejectedValue(new Error("network timeout"));
     const r = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
     });
     expect(r.lastReplayError).toBeNull();
     await r.replay();
@@ -271,7 +276,7 @@ describe("DiaryReconciler.replay", () => {
     const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
       minIntervalMs: 60_000,
     });
     const r1 = await r.replay();
@@ -300,11 +305,124 @@ describe("DiaryReconciler.replay", () => {
     const writeDiary = vi.fn().mockResolvedValue({});
     const r = new DiaryReconciler({
       diaryDir: dir,
-      repository: { canPersistDiary: true, writeDiary },
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence: probeOk() },
     });
     await r.replay();
     // Only one of the two duplicate entries should be sent
     expect(writeDiary).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Durable-aware marking semantics (Phase 6B)
+  // -------------------------------------------------------------------------
+
+  it("write-ack alone does NOT mark entry replayed when no probe and no readDiary", async () => {
+    await writeJsonl(join(dir, "2026-04-22.jsonl"), [
+      { content: "alpha", ts: "2026-04-22T01:00:00Z" },
+    ]);
+    const writeDiary = vi.fn().mockResolvedValue({});
+    // No verifyDiaryPersistence, no canReadDiary/readDiary provided
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      repository: { canPersistDiary: true, writeDiary },
+    });
+    const result = await r.replay();
+    // writeDiary is still called — the entry is sent to the backend
+    expect(writeDiary).toHaveBeenCalledTimes(1);
+    // But no sidecar should be written — entry is not marked as replayed
+    await expect(readFile(join(dir, "2026-04-22.replayed"), "utf8")).rejects.toThrow();
+    // Result reflects the write
+    expect(result.succeeded).toBe(1);
+    expect(result.failed).toBe(0);
+  });
+
+  it("post-write read confirms content — marks entry replayed", async () => {
+    await writeJsonl(join(dir, "2026-04-22.jsonl"), [
+      { content: "beta", ts: "2026-04-22T01:00:00Z" },
+    ]);
+    const writeDiary = vi.fn().mockResolvedValue({});
+    const readDiary = vi.fn().mockResolvedValue([{ content: "beta" }]);
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      repository: { canPersistDiary: true, writeDiary, canReadDiary: true, readDiary },
+    });
+    await r.replay();
+    // readDiary should be called for post-write verification
+    expect(readDiary).toHaveBeenCalledOnce();
+    // Entry should be marked replayed
+    const sidecar = await readFile(join(dir, "2026-04-22.replayed"), "utf8");
+    expect(sidecar.trim()).toBe("0");
+  });
+
+  it("post-write read does NOT find content — entry preserved in fallback", async () => {
+    await writeJsonl(join(dir, "2026-04-22.jsonl"), [
+      { content: "gamma", ts: "2026-04-22T01:00:00Z" },
+    ]);
+    const writeDiary = vi.fn().mockResolvedValue({});
+    // readDiary returns entries but NOT our content
+    const readDiary = vi.fn().mockResolvedValue([{ content: "something else" }]);
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      repository: { canPersistDiary: true, writeDiary, canReadDiary: true, readDiary },
+    });
+    await r.replay();
+    expect(writeDiary).toHaveBeenCalledTimes(1);
+    // Entry should NOT be marked replayed
+    await expect(readFile(join(dir, "2026-04-22.replayed"), "utf8")).rejects.toThrow();
+  });
+
+  it("post-write readDiary failure — entry preserved in fallback", async () => {
+    await writeJsonl(join(dir, "2026-04-22.jsonl"), [
+      { content: "delta", ts: "2026-04-22T01:00:00Z" },
+    ]);
+    const writeDiary = vi.fn().mockResolvedValue({});
+    const readDiary = vi.fn().mockRejectedValue(new Error("read timeout"));
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      repository: { canPersistDiary: true, writeDiary, canReadDiary: true, readDiary },
+    });
+    await r.replay();
+    expect(writeDiary).toHaveBeenCalledTimes(1);
+    // Entry should NOT be marked replayed because read failed
+    await expect(readFile(join(dir, "2026-04-22.replayed"), "utf8")).rejects.toThrow();
+  });
+
+  it("same-cycle probe success + write-ack — marks entry replayed (existing path)", async () => {
+    await writeJsonl(join(dir, "2026-04-22.jsonl"), [
+      { content: "epsilon", ts: "2026-04-22T01:00:00Z" },
+    ]);
+    const writeDiary = vi.fn().mockResolvedValue({});
+    const verifyDiaryPersistence = vi.fn().mockResolvedValue({ state: "persistent", verified: true });
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence },
+    });
+    await r.replay();
+    // Probe ran in this cycle
+    expect(verifyDiaryPersistence).toHaveBeenCalledOnce();
+    // Entry marked replayed
+    const sidecar = await readFile(join(dir, "2026-04-22.replayed"), "utf8");
+    expect(sidecar.trim()).toBe("0");
+  });
+
+  it("probe stale/failed — entry preserved, writeDiary not called", async () => {
+    await writeJsonl(join(dir, "2026-04-22.jsonl"), [
+      { content: "zeta", ts: "2026-04-22T01:00:00Z" },
+    ]);
+    const writeDiary = vi.fn();
+    const verifyDiaryPersistence = vi.fn().mockResolvedValue({
+      state: "write-ok-unverified",
+      verified: false,
+      error: "read returned empty",
+    });
+    const r = new DiaryReconciler({
+      diaryDir: dir,
+      repository: { canPersistDiary: true, writeDiary, verifyDiaryPersistence },
+    });
+    const result = await r.replay();
+    expect(writeDiary).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(true);
+    await expect(readFile(join(dir, "2026-04-22.replayed"), "utf8")).rejects.toThrow();
   });
 });
 

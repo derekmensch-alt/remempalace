@@ -48,6 +48,8 @@ import {
 } from "./services/prompt-injection-service.js";
 import { RecallService } from "./services/recall-service.js";
 import { LearningService } from "./services/learning-service.js";
+import { LatencyMetricsService } from "./services/metrics-service.js";
+import { BackendCircuitBreakers } from "./services/circuit-breaker.js";
 
 interface SessionMessage {
   role?: string;
@@ -256,6 +258,17 @@ const plugin = {
     logger.info(`config resolved: pythonBin=${cfg.mcpPythonBin}`);
 
     const metrics = new Metrics();
+    const latencyMetrics = new LatencyMetricsService();
+    const breakers = new BackendCircuitBreakers({
+      search: cfg.breaker.search,
+      kg: cfg.breaker.kg,
+      diary: cfg.breaker.diary,
+    });
+    const stageBudgets = {
+      init: cfg.injection.budgets.initMs,
+      fetch: cfg.injection.budgets.fetchMs,
+      format: cfg.injection.budgets.formatMs,
+    };
     const mcp = McpClient.shared({ pythonBin: cfg.mcpPythonBin });
     const searchCache = new MemoryCache<SearchResult[]>({
       capacity: cfg.cache.capacity,
@@ -265,7 +278,10 @@ const plugin = {
       capacity: cfg.cache.capacity,
       ttlMs: cfg.cache.kgTtlMs,
     });
-    const mempalaceRepository = new McpMemPalaceRepository(mcp);
+    const mempalaceRepository = new McpMemPalaceRepository(mcp, {
+      latency: latencyMetrics,
+      breakers,
+    });
     const router = new MemoryRouter({
       repository: mempalaceRepository,
       searchCache,
@@ -637,15 +653,25 @@ const plugin = {
         }
 
         const memoryDeadline = createPromptMemoryDeadline();
-        const initBudgetMs = stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.init);
+        const initBudgetMs = stageBudgetMs(memoryDeadline, stageBudgets.init);
         const initResult = await withPromptMemoryDeadline(
           initPromise.then(() => true),
           false,
           initBudgetMs,
         );
         const initLatencyMs = Math.max(0, Date.now() - promptStartedAt);
+        latencyMetrics.recordLatency("before_prompt_build.init", initLatencyMs);
         metrics.inc("latency.before_prompt_build.init.ms_total", initLatencyMs);
         metrics.inc("latency.before_prompt_build.init.count");
+        if (initLatencyMs > stageBudgets.init) {
+          metrics.inc("latency.before_prompt_build.init.overrun");
+          void debugLog("before_prompt_build:init-overrun", {
+            sessionKey,
+            initLatencyMs,
+            budgetMs: stageBudgets.init,
+          });
+          logger.warn(`prompt-path init overran sub-budget: ${initLatencyMs}ms > ${stageBudgets.init}ms`);
+        }
         if (initResult.timedOut || !initResult.value) {
           metrics.inc("recall.init.timeout");
           await debugLog("before_prompt_build:init-timeout", {
@@ -666,11 +692,11 @@ const plugin = {
                 daysBack: 7,
                 diaryReadTimeoutMs: Math.min(
                   500,
-                  stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.fetch),
+                  stageBudgetMs(memoryDeadline, stageBudgets.fetch),
                 ),
               }),
               { diary: [], events: [] },
-              stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.fetch),
+              stageBudgetMs(memoryDeadline, stageBudgets.fetch),
             );
             const tl = timelineResult.value;
             if (timelineResult.timedOut) {
@@ -791,7 +817,7 @@ const plugin = {
           if (recallMode === "full") {
             const fastRaceMs = Math.min(
               cfg.injection.fastRaceMs,
-              stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.fetch),
+              stageBudgetMs(memoryDeadline, stageBudgets.fetch),
             );
             const fastResult = await withPromptMemoryDeadline(
               bundlePromise,
@@ -833,7 +859,7 @@ const plugin = {
               emptyRecallBundle(),
               Math.min(
                 cfg.injection.fastRaceMs,
-                stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.fetch),
+                stageBudgetMs(memoryDeadline, stageBudgets.fetch),
               ),
             );
             if (cheapKgResult.timedOut) {
@@ -853,10 +879,20 @@ const plugin = {
             precomputedRecallBySession.delete(sessionKey);
           }
           const fetchLatencyMs = Math.max(0, Date.now() - fetchStartedAt);
+          latencyMetrics.recordLatency("before_prompt_build.fetch", fetchLatencyMs);
           metrics.inc("latency.before_prompt_build.fetch.ms_total", fetchLatencyMs);
           metrics.inc("latency.before_prompt_build.fetch.count");
+          if (fetchLatencyMs > stageBudgets.fetch) {
+            metrics.inc("latency.before_prompt_build.fetch.overrun");
+            void debugLog("before_prompt_build:fetch-overrun", {
+              sessionKey,
+              fetchLatencyMs,
+              budgetMs: stageBudgets.fetch,
+            });
+            logger.warn(`prompt-path fetch overran sub-budget: ${fetchLatencyMs}ms > ${stageBudgets.fetch}ms`);
+          }
           const formatStartedAt = Date.now();
-          const formatBudgetMs = stageBudgetMs(memoryDeadline, PROMPT_STAGE_BUDGETS_MS.format);
+          const formatBudgetMs = stageBudgetMs(memoryDeadline, stageBudgets.format);
           const kgFacts = normalizeKgResult(bundle.kgResults);
           const overheadTokens = promptInjectionService.computeOverheadTokens({
             identityIncluded: identityCompacted.length > 0,
@@ -885,9 +921,20 @@ const plugin = {
             memoryLines: injected,
           });
           const formatLatencyMs = Math.max(0, Date.now() - formatStartedAt);
+          latencyMetrics.recordLatency("before_prompt_build.format", formatLatencyMs);
           metrics.inc("latency.before_prompt_build.format.ms_total", formatLatencyMs);
           metrics.inc("latency.before_prompt_build.format.count");
+          if (formatLatencyMs > stageBudgets.format) {
+            metrics.inc("latency.before_prompt_build.format.overrun");
+            void debugLog("before_prompt_build:format-overrun", {
+              sessionKey,
+              formatLatencyMs,
+              budgetMs: stageBudgets.format,
+            });
+            logger.warn(`prompt-path format overran sub-budget: ${formatLatencyMs}ms > ${stageBudgets.format}ms`);
+          }
           const totalLatencyMs = Math.max(0, Date.now() - promptStartedAt);
+          latencyMetrics.recordLatency("before_prompt_build.total", totalLatencyMs);
           metrics.inc("latency.before_prompt_build.total.ms_total", totalLatencyMs);
           metrics.inc("latency.before_prompt_build.total.count");
           metrics.setMax("latency.before_prompt_build.total.max_ms", totalLatencyMs);
@@ -998,7 +1045,7 @@ const plugin = {
     if (typeof api.registerCommand === "function") {
       api.registerCommand({
         name: "remempalace",
-        description: "Show remempalace memory plugin status (MCP, caches, diary fallback)",
+        description: "Show remempalace memory plugin status (health, latency, breakers, diary)",
         acceptsArgs: false,
         handler: async () => {
           const diaryStatus = await diaryService.getStatus({ reconciler: diaryReconciler });
@@ -1007,10 +1054,15 @@ const plugin = {
             canWriteDiary: mempalaceRepository.canWriteDiary,
             canReadDiary: mempalaceRepository.canReadDiary,
             canInvalidateKg: mempalaceRepository.canInvalidateKg,
+            canPersistDiary: mempalaceRepository.canPersistDiary,
             searchCache: searchCache.stats(),
             kgCache: kgCache.stats(),
             metrics: metrics.snapshot(),
+            latency: latencyMetrics.snapshot(),
+            breakers: breakers.snapshot(),
             diary: diaryStatus,
+            lastProbeAt: lastHealthProbeAt,
+            lastProbeReason: lastHealthProbeReason,
             lastRecall,
           });
           // Append cold-start health hint when MCP hasn't init'd yet and a snapshot exists.
@@ -1020,7 +1072,7 @@ const plugin = {
             const staleMark = coldStartHealth.stale ? " [stale]" : "";
             const hintLines = [
               "",
-              `Cold-start health hint (${age}s ago${staleMark}):`,
+              `cold_start_hint (${age}s ago${staleMark}):`,
               `  mcp_ready: ${h.mcpReady}`,
               `  diary_persistence: ${h.diaryPersistenceState}`,
               `  capabilities: write=${h.capabilities.canWriteDiary} read=${h.capabilities.canReadDiary} kg_invalidate=${h.capabilities.canInvalidateKg} persist=${h.capabilities.canPersistDiary}`,

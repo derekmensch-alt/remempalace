@@ -62,6 +62,12 @@ export interface RemempalaceConfig {
     identityMaxTokens: number;
     rawIdentity: boolean;
     fastRaceMs: number;
+    /** Stage-level sub-budgets within the shared prompt-path deadline. */
+    budgets: {
+      initMs: number;
+      fetchMs: number;
+      formatMs: number;
+    };
   };
   tiers: {
     l1Threshold: number;
@@ -109,6 +115,12 @@ export interface RemempalaceConfig {
     path: string;
     maxEntries: number;
     flushIntervalMs: number;
+  };
+  /** Per-backend circuit-breaker configuration. */
+  breaker: {
+    search: { failureThreshold: number; windowMs: number; cooldownMs: number };
+    kg: { failureThreshold: number; windowMs: number; cooldownMs: number };
+    diary: { failureThreshold: number; windowMs: number; cooldownMs: number };
   };
 }
 
